@@ -1,0 +1,1233 @@
+\documentclass[10pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage[version=4]{mhchem}
+\usepackage{stmaryrd}
+\usepackage{graphicx}
+\usepackage[export]{adjustbox}
+\graphicspath{ {./images/} }
+\usepackage{caption}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, filecolor=magenta, urlcolor=cyan,}
+\urlstyle{same}
+\usepackage{bbold}
+\usepackage{multirow}
+
+\title{Tagged for Direction: Pinning Down Causal Edge Directions with Precision }
+
+\author{Florian Peter Busch ${ }^{*, 1,2}$, Moritz Willig ${ }^{*, 1}$, Florian Guldan ${ }^{1}$, Kristian Kersting ${ }^{1,2,3,4}$, Devendra Singh Dhami ${ }^{5}$\\
+${ }^{1}$ Computer Science Department, Technical University of Darmstadt\\
+${ }^{2}$ Hessian Center for AI (hessian.AI)\\
+${ }^{3}$ German Research Center for AI (DFKI)\\
+${ }^{4}$ Centre for Cognitive Science, Technical University of Darmstadt\\
+${ }^{5}$ Department of Mathematics and Computer Science, Eindhoven University of Technology}
+\date{}
+
+
+%New command to display footnote whose markers will always be hidden
+\let\svthefootnote\thefootnote
+\newcommand\blfootnotetext[1]{%
+  \let\thefootnote\relax\footnote{#1}%
+  \addtocounter{footnote}{-1}%
+  \let\thefootnote\svthefootnote%
+}
+
+%Overriding the \footnotetext command to hide the marker if its value is `0`
+\let\svfootnotetext\footnotetext
+\renewcommand\footnotetext[2][?]{%
+  \if\relax#1\relax%
+    \ifnum\value{footnote}=0\blfootnotetext{#2}\else\svfootnotetext{#2}\fi%
+  \else%
+    \if?#1\ifnum\value{footnote}=0\blfootnotetext{#2}\else\svfootnotetext{#2}\fi%
+    \else\svfootnotetext[#1]{#2}\fi%
+  \fi
+}
+
+\DeclareUnicodeCharacter{0131}{\ifmmode\imath\else{$\imath$}\fi}
+\DeclareUnicodeCharacter{2192}{\ifmmode\rightarrow\else{$\rightarrow$}\fi}
+
+\begin{document}
+\maketitle
+\captionsetup{singlelinecheck=false}
+
+
+\begin{abstract}
+Not every causal relation between variables is equal, and this can be leveraged for the task of causal discovery. Recent research shows that pairs of variables with particular type assignments induce a preference on the causal direction of other pairs of variables with the same type. Although useful, this assignment of a specific type to a variable can be tricky in practice. We propose a tag-based causal discovery approach where multiple tags are assigned to each variable in a causal graph. Existing causal discovery approaches are first applied to direct some edges, which are then used to determine edge relations between tags. Then, these edge relations are used to direct the undirected edges. Doing so improves upon purely type-based relations, where the assumption of type consistency lacks robustness and flexibility due to being restricted to single types for each variable. Our experimental evaluations show that this boosts causal discovery and that these high-level tag relations fit common knowledge.
+\end{abstract}
+
+\section*{1 Introduction}
+The recovery of causal relations from data has been a long-standing area of research interest [Guo et al., 2020. Schölkopf et al., 2021, Schölkopf, 2022]. Over the years, several methods with varying assumptions -among others, assumptions on the types of relations and noise [Hoyer et al., 2008, Mooij et al., 2011], availability of interventional data [Zečević et al., 2021], and recurring effects over time [Bouchattaoui et al., 2024]- have been proposed. With the recent emergence of large language models (LLMs), causal discovery has been opened up to incorporate ubiquitous external knowledge that was previously hard to provide in practice. With arguments for and against the theoretical limitations of performing correct causal dis-
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-01_216_498_1740_1228}
+\captionsetup{labelformat=empty}
+\caption{Figure 1: Tags Inform About Causal\\
+Relations: We predict the causal direction of undirected edges by taking tags of variables into account. Background knowledge on how tags relate to each other helps predict edge directions.}
+\end{center}
+\end{figure}
+
+covery [Keshmirian et al., 2024, Lampinen et al., 2024, Joshi et al., 2024, Chi et al., 2024], LLMs have been found to rather struggle in practice when being tasked to perform causal inference or discovery [Zhiheng et al., 2022, Zečević et al., 2023, Kıcıman et al., 2023]. Recent research has therefore turned to treating LLMs as 'advisory models' with noisy predictions while still backing up their proposed relations with the actual data [Brouillard et al., 2022, Wang et al., 2024].
+
+\footnotetext{*These authors share equal contribution.
+}\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-02_395_1318_229_399}
+\captionsetup{labelformat=empty}
+\caption{Figure 2: Tag-Supported Causal Discovery. The figure illustrates the tagging-based causal discovery described in this paper: First, a causal discovery algorithm such as PC or GES is used to obtain a CPDAG. Variables are tagged with semantically meaningful tags, for example, by using an LLM. Lastly, tag relations on the CPDAG are used to predict the direction of undirected edges.}
+\end{center}
+\end{figure}
+
+When reasoning over the causal relations that are present in some scenario, humans do not only consider the pure numbers but often also leverage meta-information about the types of variables and the assumed properties and biases attached to them [Bonawitz et al., 2010, Meltzoff, 2007, Bailey et al., 2024]. While such assumptions on meta-information on variables have been successfully leveraged in causal predictions [Peters et al., 2016, Gamella and Heinze-Deml, 2020], a more general way of binding such biases about edge directions to the types of variables was proposed by Brouillard et al. [2022]. Their type consistency assumption states that pairs of variables with particular type assignments induce a bias on the causal direction of other (possibly still undirected) pairs of variables with the same type. Type consistency, therefore, considers how different types relate to each other from a high-level perspective and generalizes exogenous → endogenous relations. While typing creates a useful tool for incorporating common-sense knowledge into the causal discovery process, there might be a general debate about whether any variable does inherently entail a specific type (e.g., the type of 'exogenous' variable is a subjective/contextual assignment), and whether this particular type does induce an informative prior in practice, making an assignment of a specific tag type tricky.\\
+To this end, we propose tags, which are more flexible and encode more information. We aim to improve the typing causality approach in two different ways: (1) we go beyond the strict framework of single types per variable and instead employ a tagging approach where each variable can be assigned multiple tags. This not only can make assigning information easier and more flexible since tags do not need to be mutually exclusive. It can also provide more information if multiple different tags are used. (2) In the typing approach, if the type consistency is violated, an incorrect graph will be returned. We allow for more uncertainty where some inconsistencies of causal relations between tags can be overruled by other tags, resulting in a more flexible approach (Fig. 1). Still, our approach is data first, using tagging as a heuristic involving meta-information about variables only when necessary.
+
+Contributions. (1) We introduce an approachfor causal discovery leveraging tagging information where tags provide information about edge direction. (2) We show how LLMs can be leveraged as stand-in experts to infer tags that improve the performance of existing algorithms. (3) We bridge the gap between individual edge predictions that do not inform each other and fully typed discovery. Our code is made available at \href{https://github.com/olfub/tagged_for_direction}{https://github.com/olfub/tagged\_for\_direction}.
+
+\section*{2 Background and Related Work}
+Causal Discovery. A causal graph $\mathcal{G}$ is an acyclic directed graph (DAG) that represents the structure of cause-effect relations over an indexed set of variables $\mathcal{X}$ [Spirtes et al., 2000, Pearl, 2009]. For every cause-effect relation between variables $X_{i}, X_{j} \in \mathcal{X}$, individual edges $\left(X_{i}, X_{j}\right) \in \mathcal{X} \times \mathcal{X}$ in the graph point from the effect $X_{i}$ to the cause $X_{j}$. Causal discovery is concerned with identifying the underlying causal graph from data [Peters et al., 2017]. Even when disregarding the presence of hidden confounders, causal models can often only be discovered up to Markov equivalence [Verma and Pearl, 2022, 1992] from observational data without further assumptions. Completed partially directed acyclic graphs (CPDAGs) comprise all Markov equivalent DAGs that are admissible under the given data but leave some edges undirected [Andersson et al., 1997]. The approach in this paper aims to refine CPDAGs in an attempt to further direct remaining undirected edges. A primary class of causal discovery methods is constraint-based algorithms, which utilize independence tests to recover\\[0pt]
+the graph skeleton. We will rely on the well-known PC algorithm [Spirtes and Glymour, 1991], which performs skeleton and immorality discovery followed by Meek rules [Meek, 1995]. Another primary class are score-based algorithms that find the best graph by maximizing a particular scoring function. A common representative of this class of methods is greedy equivalence search (GES), which greedily adds and removes edges, starting from an empty graph [Chickering, 2002].\\[0pt]
+Breaking Markov Equivalence. Additional assumptions are needed to break Markov equivalence when trying to recover causal graphs from observational data and moving beyond CPDAGs by leveraging background knowledge [Perković et al., 2017]. Here, the provision of interventional data [Hauser and Bühlmann, 2012, Brouillard et al., 2020] or additional knowledge about the type of causal relations and noise can be used [Shimizu et al., 2006, Hoyer et al., 2008]. Furthermore, meta-considerations about the structure of graphs [Mansinghka et al., 2012] or edge directioning based on CPDAG conforming model counting [Long et al., 2023] have been proposed. Recently, the use of meta-information based on variable names has been suggested. Here, Brouillard et al. [2022] put forward the idea of assigning particular types to variables and using these types to enforce a type consistency between edges between variables of similar types. In particular, our work is particularly close to Brouillard et al. [2022], which we generalize by using several tags instead of single types.
+
+Causal Discovery and LLM. Several works have investigated the causal reasoning abilities of LLM [Kıcıman et al., 2023, Jin et al., 2023, Zečević et al., 2023, Gendron et al., 2023]. Works in this field also consider the causal discovery of graphs via direct questioning of LLM [Long et al., Kıcıman et al., 2023, Zečević et al., 2023, Jiralerspong et al., 2024], and combined approaches, jointly leveraging the learned knowledge of LLM and data [Choi et al., 2022, Long et al., 2023, Mathur et al., 2024]. We will use the world knowledge inherent to LLMs to assign tagging sets to variables.
+
+\section*{3 Tagging Informed Edge Direction}
+The underlying assumption of our approach is that the observation of causal directions between higher-level concepts can be used to make an informed decision on the direction of causality on their lower-level realizations. Then, abstract concepts can be used to compute statistics from discovered edges to transfer those to edges that could not be directed by a classical causal discovery algorithm.
+
+In one such approach, Brouillard et al. [2022] assigns types to variables to gather statistics based on the already directed causal edges. Under the assumption of type consistency, 'typed' variable triplets of the form $A-C-B$ can be directed when variables $A, B$ are assigned the same type by either pointing edges towards ( $A \rightarrow C \leftarrow B$ ) or away ( $A \leftarrow C \rightarrow B$ ) from $C$. Undirected edges can also be directed by enforcing type consistency. This rather strong assumption has several drawbacks. First, it does not provide information about the relations between variables of the same type. Second, it can not consider particular aspects shared between variables of different types since only one type can be assigned to any variable. In this work, we generalize the notion of types by associating multiple tags $\mathbf{t}$ to every variable $X_{i}$, as assigned by some tagging function $\mathbf{t}:=\operatorname{tag}\left(X_{i}\right)$. Individual tags $\mathrm{t}^{a} \in \mathbf{t}$ are general concepts such as "Symptom" or "Demographic Information", expressed in natural language. Tagging allows us to draw more evidence from a causal graph by incorporating information about directed edges into multiple tagging rela-
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-03_338_454_1452_1276}
+\captionsetup{labelformat=empty}
+\caption{Figure 3: Connectivity of Edge Directions. The figure shows the assumed general relation between taggings sets and edges: variables $X_{i}$ and $X_{j}$ determine the general existence of an edge $\mathrm{E}_{i j}$, with the resulting edge direction $d_{i j}$ being determined via tagging sets $\mathbf{t}_{i}, \mathbf{t}_{j}$ and an edge specific noise factor $N_{i j}$.}
+\end{center}
+\end{figure}
+
+tions rather than the single type relation of the two connected variables (see the basic idea in Fig. 2).
+
+The starting point of our algorithm is an existing CPDAG. An edge $E_{i j}$ between the variables $X_{i}, X_{j}$ either indicates $X_{i}$ causing $X_{j}\left(X_{i} \rightarrow X_{j}\right)$, $X_{j}$ causing $X_{i}\left(X_{j} \rightarrow X_{i}\right)$ or the edge being undirected $\left(X_{i}-X_{j}\right)$. We denote edge direction as $d_{i j} \in\{-1,0,1\}$ where a value of 1 indicates $X_{i} \rightarrow X_{j},-1$ indicates $X_{j} \rightarrow X_{i}$ and 0 indicates $X_{i}-X_{j}$. The following symmetry holds: $d_{j i}=-d_{i j}$.\\
+Tag Informative Value. In order to transfer knowledge from the observation of an edge to the prediction of another edge, we need to assess the level of similarity between both edges to correctly\\
+compute the strength of shared informative value. We assume the overlap in tagging sets to serve as the common denominator of edge similarity. Consequently, we assume the edge direction to be the result of some edge direction function $f$ with $d_{i j}:=f\left(\mathbf{t}_{i}, \mathbf{t}_{j}, N_{i j}\right)$, taking the tag sets of both variables and a noise term $N_{i j}$ that is specific to the individual edge (Fig. 3). We assume that $d_{i j}$ can be predicted via knowledge of $\mathbf{t}_{i}, \mathbf{t}_{j}$ and that the individual influence of $N_{i j}$ is rather small.\\
+When observing a CPDAG, we are interested in quantifying how much the observation of a particular pair of tags attached to some edge informs us about the directionality of other edges when observing that particular pair of tags again. For this, we define a tag informative value, which measures the probability of observing a particular pair of tags with respect to a particular edge direction, $\left(t_{i}^{a}, t_{j}^{b}\right) \sim d_{i j}$. The probability underlying the tag informative value is a conditional probability with respect to its sample space. Here, the sample space is the set of all edges between variables of $\mathcal{Y} \subseteq \mathcal{X}$ that involve tags $\mathrm{t}^{a}$ and $\mathrm{t}^{b}$. First, we define an auxiliary function to determine whether two specific variables are tagged with the tags of interest: tagged $\left(X, Y, \mathrm{t}^{a}, \mathrm{t}^{b}\right):=\left(\mathrm{t}^{a} \in \operatorname{tag}(X)\right) \wedge\left(\mathrm{t}^{b} \in \operatorname{tag}(Y)\right)$. Next, we define the filtered subset of all edges that connect variables in $\mathcal{Y}$ and involve tags $\mathrm{t}^{a}, \mathrm{t}^{b}$ :
+
+
+\begin{equation*}
+\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}=\left\{\left(X_{i}, X_{j}\right) \in \mathbf{E} \mid X_{i} \in \mathcal{Y} \wedge X_{j} \in \mathcal{Y} \wedge\left(\operatorname{tagged}\left(X_{i}, X_{j}, \mathrm{t}^{a}, \mathrm{t}^{b}\right) \vee \operatorname{tagged}\left(X_{j}, X_{i}, \mathrm{t}^{a}, \mathrm{t}^{b}\right)\right)\right\} \tag{1}
+\end{equation*}
+
+
+Now $p^{\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}}\left(X_{i} \rightarrow X_{j}\right)$ is the probability that a randomly chosen edge $\left(X_{i}, X_{j}\right) \in \mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}$ satisfies tagged $\left(X, Y, \mathrm{t}^{a}, \mathrm{t}^{b}\right)$ and we define the tag informative value as follows:\\
+Definition 1. Tag Informative Value. A pair of tags ( $t^{a}, t^{b}$ ) over a set of variables $\boldsymbol{Y} \subseteq \boldsymbol{\mathcal { X }}$ has tag informative value
+
+$$
+I^{\mathcal{Y}}\left(t^{a}, t^{b}\right):=p^{\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}}\left(X_{i} \rightarrow X_{j}\right)=\frac{\left|\left\{\left(X_{i}, X_{j}\right) \in \mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}} \mid \operatorname{tagged}\left(X_{i}, X_{j}, \mathrm{t}^{a}, \mathrm{t}^{b}\right)\right\}\right|}{\left|\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}\right|}
+$$
+
+where $p^{\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}}\left(X_{i} \rightarrow X_{j}\right)$ is the probability of all edges between any two variables $X_{i}, X_{j}$ in $\mathcal{Y}$ with tag sets $\mathbf{t}_{i}, \mathbf{t}_{j}$ containing tags $t^{a}, t^{b}$ to be directed as $X_{i} \rightarrow X_{j}$.
+
+Put plainly, we expect the direction of an edge $d_{i j}$ annotated with tags $\left(\mathrm{t}_{i}^{a}, \mathrm{t}_{j}^{b}\right)$ to more likely result in $X^{i} \rightarrow X^{j}\left(d_{i j}=1\right)$ if we have previously observed a high percentage of other edges between variables with tags $\mathrm{t}_{i}^{a}, \mathrm{t}_{j}^{b}$ pointing in the same direction $\mathrm{t}_{i}^{a} \rightarrow \mathrm{t}_{j}^{b}$. Some particular pairs of tags $\left(t^{a}, t^{b}\right)$ might never be observed within a graph. In the absence of evidence we default $I\left(t_{i}^{a}, t_{j}^{b}\right)$ to the value 0.5 and introduce an indicator function $o^{\mathcal{Y}}\left(t^{a}, t^{b}\right):=\mathbb{I}\left(\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}} \neq \emptyset\right)$ (where $\mathbb{I}$ is 1 if $\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}} \neq \emptyset$ and 0 otherwise) that filters these cases of no observed evidence in the following formulas.\\
+In our particular case, we assume the true underlying edge direction function $f$ to be realized as the average of tag informative values between all pairs of tags in $\mathbf{t}_{i}, \mathbf{t}_{j}$ :
+
+
+\begin{equation*}
+d_{i j}^{\prime} \mathcal{Y}=\frac{1}{\sum_{\mathrm{t}^{a} \in \mathbf{t}_{i}, \mathrm{t}^{b} \in \mathbf{t}_{j}} o^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)} \sum_{\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right) \in \mathbf{t}_{i} \times \mathbf{t}_{j}} I^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right) o^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)+N_{i j} . \tag{2}
+\end{equation*}
+
+
+Since $d_{i j}^{\prime} \mathcal{Y}$ is still a continuous quantity, we need to discretize it onto one of the possible edge directions. We set $d_{i j}^{\mathcal{Y}}$ to 1 (indicating $X_{i} \rightarrow X_{j}$ ) whenever $d_{i j}^{\mathcal{Y}}>0.5+\epsilon$. We set $d_{i j}^{\mathcal{Y}}$ to -1 (indicating $X_{j} \rightarrow X_{i}$ ) whenever $d_{i j}^{\prime} \mathcal{Y}<0.5-\epsilon$. We abstain from directing the edge ( $d_{i j}^{\mathcal{Y}}=0$ ) whenever $0.5-\epsilon \leq d_{i j}^{\prime} \mathcal{Y} \leq 0.5+\epsilon$, for some small $\epsilon \in \mathbb{R}_{>0}$.\\
+Usually, evidence for estimating edge directions is collected over all variables ( $\mathcal{Y}=\mathcal{X}$ ) such that $d_{i j}^{\mathcal{X}}$ is computed. However, to reliably predict the direction of undirected edges from observed evidence, we must assume that edges in the directed and undirected cases both follow the same statistics:\\
+Assumption 1. Tag Distribution Consistency. For any two sufficiently large subsets $\mathcal{Y}^{\prime}, \mathcal{Y}^{\prime \prime} \subseteq \mathcal{X}$ and some small $\epsilon \in \mathbb{R}_{>0}$, the tag informative values of both sets converge towards each other: $\forall \mathrm{t}^{a} \in \mathbf{t}_{i}, \mathrm{t}^{b} \in \mathbf{t}_{j} . \lim _{\left|\mathcal{Y}^{\prime}\right|,\left|\mathcal{Y}^{\prime \prime}\right| \rightarrow \infty}\left|I^{\mathcal{Y}^{\prime}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)-I^{\mathcal{Y}^{\prime \prime}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)\right|<\epsilon$.
+
+The tag distribution consistency assumption asserts that information about the edge direction of yet undirected edges is related to that of already directed edges. Without it, the particular embedding of variables in the causal graph might correlate with the ability of the causal discovery algorithm to\\
+direct them, such that all undirected edges follow a different distribution than the observed ones. The assumption can usually not be checked in practice, but we assume it to hold under mild conditions, e.g., when applying causal discovery methods to domains with rather homogeneous structures, as shown in the successful application of our algorithm for several datasets. The assumption, however, might be violated when scaling to larger systems where the role and importance of individual tags might change depending on the local substructure. Eventually, it is upon the practitioner to decide whether or not this assumption holds for their particular application and can induce a helpful bias.\\
+Failure Modes. Since the provided CPDAG, used to compute the discussed statistics, usually stems from a prior run of a causal discovery method, it is likely to contain errors and not represent the optimal obtainable solution. To investigate the effects of such errors, we include an ablation study in Sec. 4.2 measuring performance decay when edges are removed or wrongly directed.
+
+\subsection*{3.1 Tagging Approach}
+Our algorithm works by first collecting statistics about the tag informative value $p\left(X_{i} \rightarrow X_{j}\right)$ from the directed edges of a CPDAG and subsequently using this information to direct the remaining edges one by one. Note that our algorithm does not modify the underlying skeleton. That is, we only decide on directionality but do not add or remove any existing edges based on tagging information. While trying to adhere to a data-first approach, not modifying the recovered skeleton, and basing our statistics on the recovered graph, several hyperparameters arise during the construction of our algorithm. We outline these in the following.\\
+Collect Tagging Evidence. Given a CPDAG, we first estimate the direction information induced by an ordered pair of tags $\left(t^{a}, t^{b}\right)$ by counting the number of edges $\left(X_{i}, X_{j}\right) \in \mathbf{E}$ between all nodes $X_{i}, X_{j}$ which are of type $t^{a}$ and $t^{b}$, respectively. Collecting this information over all combinations of all tags present in the graph, $T=\mathbf{t}_{1} \cup \cdots \cup \mathbf{t}_{N}$, results in an $\mathbb{N}^{|T| \times|T|}$-matrix $C$ with entries
+
+
+\begin{equation*}
+C_{a b}^{\mathcal{Y}}=\left|\left\{\left(X_{i}, X_{j}\right) \in \mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}} \mid \operatorname{tagged}\left(X_{i}, X_{j}, t^{a}, t^{b}\right)\right\}\right| \tag{3}
+\end{equation*}
+
+
+Following the discussion on Assumption 1 all statistics should be computed over the largest possible set of evidence, that is, over all variables $\left(C_{a b}^{\mathcal{X}}\right)$. In the following, we therefore do not explicitly note $\mathcal{X}$ in the superscript and simply write $C_{a b}$. To determine whether to direct an edge connecting nodes of types $t_{a}, t_{b}$ in $t_{a} \rightarrow t_{b}$ or $t_{b} \rightarrow t_{a}$ direction, the probability $\hat{p}_{a b}$ is estimated:
+
+
+\begin{equation*}
+\hat{p}_{a b}=\frac{C_{a b}}{C_{a b}+C_{b a}} . \tag{4}
+\end{equation*}
+
+
+The quantity $\hat{p}_{a b}$ directly estimates the tag informative value of Def. 1. For a more compact notation we keep the expression $\hat{p}_{a b}$ instead of writing $p^{\mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}}\left(X_{i} \rightarrow X_{j}\right)$ every time. A $\hat{p}_{a b}$ of 0.5 indicates no preference for either direction, while $\hat{p}_{a b}=0$ and $\hat{p}_{a b}=1$ indicate a full support for directing the edge as $t_{a} \rightarrow t_{b}$ or $t_{b} \rightarrow t_{a}$, respectively.\\
+Specificity Prior. We furthermore considered the use of a 'specificity prior' to weigh tags occurring in specific sub-parts of the causal graphs more strongly. However, we found no empirical evidence for improvement in the experiments, and describe its use in App. B for completeness.\\[0pt]
+Absence of V-Structures. In line with the algorithm of Brouillard et al. [2022] that enforces type consistency within variable triplets, we propose a variant of our method that considers nodes within triplets that contain the same tags as a source of information. Since the successful detection of a v-structure, e.g., in the PC algorithm, assumes those edges to already be directed as $A \rightarrow C \leftarrow B$, the variant takes the absence of such a v-structure into account when collecting evidence. While edges of detected v-structures always go into the tag evidence, such structures not identified as v-structured are now also considered evidence for the opposite direction of tag pairs. We denote this variant as 'AntiV' in our experiments, but find that it generally performs worse than directing edges on the CPDAG.\\
+Undirected Edges. To finally decide on the directionality of an edge $\mathrm{E}_{i j} \in \mathbf{E}$, we compute the evidence edge preference based on individual tagging pairs:
+
+
+\begin{equation*}
+Q\left(\mathrm{E}_{i j}\right)=\frac{1}{n} \sum_{\mathrm{t}^{a} \in \mathbf{t}_{i}, \mathrm{t}^{b} \in \mathbf{t}_{j}} \hat{p}_{a b} \cdot o\left(t^{a}, t^{b}\right) . \tag{5}
+\end{equation*}
+
+
+We direct all edges that do not introduce cycles with $Q\left(\mathrm{E}_{i j}\right) \neq 0.5$, such that $\hat{d}_{i j}:=1$ if $Q\left(\mathrm{E}_{i j}\right)> 0.5, \hat{d}_{i j}:=-1$ if $Q\left(\mathrm{E}_{i j}\right)<0.5$, leaving the edge undirected $\left(\hat{d}_{i j}:=0\right)$ otherwise $\left(Q\left(\mathrm{E}_{i j}\right)=0.5\right)$.
+
+We additionally considered the influence of underlying evidence for more robust statistics. We tested to require that the evidence for all $\hat{p}_{a b}$ must stem from either at least one or two different tag pairs in order to make a decision. Given the small to medium size of our datasets, we found no qualitative differences between results, with single-edge evidence performing slightly above the two-edge setup. Finally, we allow for the optional application of Meek Rules after the direction of each edge.\\
+Edge Selection. We also optimize the order of directing edges due to Meek rules and general acyclicity constraints. Specifically, we greedily select edges with high edge directionality ( $Q\left(\mathrm{E}_{i j}\right)$ being either near 0.0 or 1.0. As $Q\left(\mathrm{E}_{j i}\right)=1-Q\left(\mathrm{E}_{i j}\right)$, we independently consider half-edges $\mathrm{E}_{i j}$ and $\mathrm{E}_{j i}$, and select with $\operatorname{argmax}_{\mathrm{E}_{i j} \in \mathbf{E}} Q\left(\mathrm{E}_{i j}\right)$.\\
+Redirecting Edges. The recovered CPDAG serves as the baseline of our approach. However, it might contain errors, stemming from too little data or measurement noise. While we assume the overall graph to be trusted, we might also use our tagging statistics to detect edges that are likely to be wrongly inferred. Therefore, we optionally allow our algorithm to redirect such wrongly inferred edges before moving on to the undirected edges. (Edges that would induce cycles are still excluded.) Upon doing so, we allow the redirection to only take place at edges with decision boundary of $Q\left(\mathrm{E}_{i j}\right) \geq 0.6$. As one might not trust the evidence stemming from the edge under consideration, one might not include it into the statistics. Again, this is a hyperparameter that is up to the user to decide. Within our experiments, we found no clear evidence for or against the use of this parameter. Last, we provide two variants of a redirection strategy, with either updating or not updating the evidence after redirecting edges. We provide the full pseudo-code of our algorithm in App. C
+
+Theoretical Analysis. From Assumption 1, we expect the tag informative values to, on average, indicate the correct edge direction. Assuming the tag informative values $\mathbf{I}^{\mathcal{Y}}=\left\{I_{1}^{\mathcal{Y}}, I_{2}^{\mathcal{Y}}, \ldots, I_{n}^{\mathcal{Y}}\right\}$ to be sampled from a beta distribution $\operatorname{Beta}(\alpha, \beta)$, it follows from the Central Limit Theorem that the variance of our prediction given $n$ tag pairs is given as (see the full derivation in App. A):
+
+
+\begin{equation*}
+\operatorname{Var}\left[d_{i j}^{\prime} \mathcal{Y}\right]=\operatorname{Var}\left[\frac{1}{n} \sum_{m=1}^{n} I_{m}^{\mathcal{Y}}\right]=\frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1) n}, \quad n=\left|\mathbf{t}_{i} \times \mathbf{t}_{j}\right| . \tag{6}
+\end{equation*}
+
+
+An increasing number of tag pairs reduces the variance, thus improving the accuracy of the prediction. In the limit $n \rightarrow \infty$, this even leads to perfect predictions. However, in practice, neither an infinite number of useful tag pairs (one can not always generate new meaningful tags) nor enough edges to correctly estimate the tag informative scores are usually present. Our aforementioned parameters aim to mitigate these issues in practical scenarios with limited data.
+
+\subsection*{3.2 Tagging Annotation}
+The key driver of our algorithm's performance is meaningful variable annotations with sets of tags. These sets could, for example, be distilled by leveraging meta-information about the domain, such as variable names or short descriptions of the variables [Long et al., 2023]. In our experiments, we use LLMs as stand-in experts to provide a fair comparison between data sets. We make use of the fact that most modern LLMs are typically familiar with the given domains and therefore provide a good baseline over all datasets. The LLMs are presented with the list of all variables per dataset and prompted to assign each variable to (possibly) multiple tags or single types. The exact prompts are given in App. D. Answers from all LLMs are included in the code repository.
+
+Tag Set Deduplication. As the same concept might be described by similar tags, we deduplicate tags covering the same set of variables to avoid stronger weighting of duplicate concepts. To further differentiate from a typing approach, we optionally exclude singleton tagging sets. In our experiments, we measure the performance of both variants. We observed no strong qualitative differences but found the best-performing configuration to include singular tagging sets.\\[0pt]
+Large Language Models. All experiments are conducted using several state-of-the-art LLMs, specifically Llama-3.3-70B-Instruct [Touvron et al., 2023], Claude-3-5-sonnet-20241022 Anthropic, 2024], GPT-4-0613 [Achiam et al., 2023], GPT-4o-2024-08-06 [OpenAI, 2024] and Qwen 2.5-72BInstruct [Bai et al., 2023]. Temperature is set to zero to obtain deterministic outputs. All other parameters are left unchanged as recommended in the respective papers.
+
+Information Leakage. Recent criticism on testing causal inference abilities of LLMs on the well-known bnlearn [Scutari, 2010, Taskesen, 2020] datasets has been voiced, due to the possible
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|}
+\hline
+ & SHD Ranks & $\mathrm{SHD}_{\text {double }}$ Ranks & $\mathrm{SID}_{\text {min }}$ Ranks & $\mathrm{SID}_{\text {max }}$ Ranks & Precision Ranks & Recall Ranks & $\mathrm{F}_{1}$ Ranks \\
+\hline
+PC & $3.74 \pm 0.47$ & $3.85 \pm 0.43$ & $2.83 \pm 0.40$ & $3.65 \pm 0.48$ & $2.97 \pm 0.42$ & $3.88 \pm 0.38$ & $4.00 \pm 0.35$ \\
+\hline
+GES & $3.15 \pm 0.51$ & $2.67 \pm 0.39$ & $\mathbf{1 . 3 6} \pm 0.17$ & $3.12 \pm 0.50$ & $2.40 \pm 0.44$ & $2.87 \pm 0.43$ & $2.75 \pm 0.48$ \\
+\hline
+Typed-PC (Naive) & $2.79 \pm 0.49$ & $3.00 \pm 0.52$ & $2.73 \pm 0.41$ & $2.80 \pm 0.43$ & $2.59 \pm 0.37$ & $2.89 \pm 0.41$ & $3.03 \pm 0.46$ \\
+\hline
+Typed-PC (Maj.) & $2.46 \pm 0.31$ & $2.60 \pm 0.33$ & $2.67 \pm 0.35$ & $2.62 \pm 0.52$ & $\mathbf{2 . 1 6} \pm 0.24$ & $2.56 \pm 0.28$ & $2.55 \pm 0.29$ \\
+\hline
+Tagged-PC (AntiV) & $5.19 \pm 0.33$ & $5.26 \pm 0.27$ & $4.91 \pm 0.33$ & $4.76 \pm 0.46$ & $5.25 \pm 0.42$ & $5.18 \pm 0.28$ & $5.27 \pm 0.33$ \\
+\hline
+Tagged-PC & $2.61 \pm 0.47$ & $3.01 \pm 0.44$ & $3.11 \pm 0.57$ & $2.62 \pm 0.44$ & $2.96 \pm 0.42$ & $2.68 \pm 0.38$ & $3.00 \pm 0.40$ \\
+\hline
+Tagged-GES & $\mathbf{2 . 0 4} \pm 0.57$ & $\mathbf{1 . 8 0} \pm 0.47$ & $1.82 \pm 0.31$ & $\mathbf{1 . 9 0} \pm 0.50$ & $2.61 \pm 0.50$ & $\mathbf{1 . 7 0} \pm 0.41$ & $\mathbf{1 . 8 4} \pm 0.51$ \\
+\hline
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 1: Average Ranks for Best Configurations over all Datasets (lower is better). Tagging improves upon PC and GES. Tagged-GES frequently outperforms other methods. Note that SID ${ }_{\text {min }}$ treats undirected and correctly directed edges identically, so making fewer predictions results in better $\mathrm{SID}_{\text {min }}$ scores. Detailed scores are presented in Tab. 4 in the appendix. ${ }_{ \pm y}$ indicates std. deviation.}
+\end{center}
+\end{table}
+
+contamination of the LLM's training data with ground truth information. For our algorithm, however, no direct reasoning or inference is performed by the LLMs themselves, and no hint on how the specific tags or types will be used for structure identification is given in the prompt. Therefore, no information about causal structure is required, nor can it be leaked through the querying process.
+
+\section*{4 Experiments}
+We conduct an extensive empirical evaluation over eleven datasets. We consider all possible combinations of described parameters, resulting in 400 runs per dataset and seed ( $-44,000$ evaluations in total). We employ the PC [Spirtes and Glymour, 1991] and GES [Chickering, 2002] algorithms for initial CPDAG discovery, finding that our tagging approach on top of GES, on average, achieves the best results and also outperforms variants of the naive and majority typing approaches by Brouillard et al. [2022]. We answer the following research questions: Q1. Is tagging information a suitable indicator for determining edge directions with competitive performance? Q2. Are tagging approaches robust under the induction of graph faults? Q3. Does the homogeneity assumption hold and can it be used to identify higher-level causal relations?
+
+Datasets \& Evaluation. We evaluate algorithm performance over several datasets of the bnlearn repository [Scutari, 2010, Taskesen, 2020]. Additionally, we also include a Lung Cancer dataset (LUCAS; Guyon et al. [2011]). As we rely on language models to produce tags, we filter datasets that do not hold meaningful variable names. Eventually, we evaluate on the following datasets: Asia, Cancer, Earthquake, Survey, Alarm, Child, Insurance, Hailfinder, HEPAR2, Win95pts, and LUCAS. All experiments are carried out over 10 seeds with 10,000 randomly sampled datapoints per dataset. (We use the 2,000 ground-truth samples for the LUCAS dataset.)
+
+We measure the individual performance of edge prediction using Structural Hamming Distance (SHD; Tsamardinos et al. [2006]), Structural Intervention Distances (SID; Peters and Bühlmann [2015]) as well as Precision, Recall, and $F_{1}$-score. SHD measures the correct or incorrect prediction of edges, with classical SHD increasing its score for every incorrect prediction. We also report an alternative (SHD ${ }_{\text {double }}$ ), which counts a doubled error when encountering edges directed in the anti-causal direction. SID measures the similarity of two graphs with respect to their interventional distributions. Due to the exponential runtime scaling of SID, we could not evaluate SID on the largest datasets: Hailfinder, HEPAR2, and Win95pts. (Evaluation did not conclude after 5 days.) We report the upper and lower bounds for SID, which considers undirected edges to either be counted as correct or incorrect, respectively. Directing further edges can, therefore, never improve the lower SID bound but reduce the upper bound. All results in this paper are reported with mean and standard deviation.
+
+\subsection*{4.1 Tagging Performance}
+Results over all parameter configurations permitted by our method are evaluated on all datasets. For comparison to the PC, GES baselines, and typing approaches, we select the best-performing configuration, which we will also use in the follow-up ablations. As SHD and SID metrics scale with the number of variables and sparsity of the graphs, we use the average $\mathrm{F}_{1}$-score over all datasets to identify the best-performing configuration.
+
+We find the overall best strategy is obtained by not employing the AntiV approach, without removing single tags, without the specificity prior, with applying Meek rules after every step, without the redirection of existing edges, and using the tagging sets produced by GPT-4. When considering PC as the baseline algorithm, we find that the best configuration is almost unchanged, with the exception of using Meek rules after each edge direction performing better. The next best configurations are listed in Tab. 2 in the appendix, highlighting a relatively high stability of our algorithm even under slightly changed configurations. As Brouillard et al. [2022] employed synthetic types that resembled the ground-truth order of variables within the causal graph, we, again, use LLMs to provide types for all variables. We find that Claude-3.5 Sonnet assigns the best-performing set of types.
+
+We compare our method with PC and GES baselines (Tagged-PC and Tagged-GES) to standard PC and GES and previous typing approaches with both naive and majority strategies. (Brouillard et al. [2022] presented another $t$-Propagation approach which, however, requires strict type consistency. As strict type consistency rarely holds for any non-constructed types, we omit this last step and additionally compare to this approach in Tab. 4 in the appendix.) As SHD and SID metrics scale non-linearly with the size of the dataset, we rank absolute results per dataset and average the resulting ranks across all seeds. Results are presented in Tab. 1. A detailed reporting of all absolute metric scores across datasets is provided in Tab. 4 in the appendix.
+
+Results. We find GES approaches to generally perform better across most metrics. Both tagging approaches, -ignoring the AntiV variant-consistently improve upon their PC and GES baselines. When comparing typing approaches to each other, we find the 'majority' variant to perform better than the 'naive' variant on all metrics. While the majority variant performs better than Tagged-PC on average, inspecting the datasets individually (Tab. 4) shows that Typed-PC often performs better than Tagged-PC on smaller, but worse on larger datasets. This aligns with our theoretical results of Sec. 3.1 on the benefits of considering tag sets on sufficiently large graphs.
+
+Comparing the overall performance, we find average Tagged-GES results to consistently rank best across all methods and metrics, with the exception of SID ${ }_{\min }$ and Precision, which are both metrics that disproportionately favor keeping edges undirected. While
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-08_399_626_949_1125}
+\captionsetup{labelformat=empty}
+\caption{Figure 4: Accuracy with Errors in the Graph. Tags generated by GPT-4. Removing edges decreases performance only slightly, whereas inverting edges has a stronger negative impact on prediction accuracy. The effect is even more pronounced in small datasets. See App. E. 6 for all LLMs.}
+\end{center}
+\end{figure}
+
+Influence of LLM. We now take a closer look at the impact of tagging annotations produced by the individual LLMs on the resulting performance. For this evaluation, we select the best configurations of hyperparameters measured by $F_{1}$ score per LLM. This allows every LLM to choose its optimal parameter setting, which might not align with the GPT-4 configuration that was determined as the globally best configuration. The selected parameter configurations per LLM and their $F_{1}$ scores are shown in Tab. 3 We observe no strong qualitative differences between models. The resulting $F_{1}$ scores lie closely together, which demonstrates that our algorithm is robust to changes in tagging sets.
+
+\subsection*{4.2 Influence of Graph Faults}
+Our tagging heuristic can possibly serve to complement every causal discovery algorithm that produces partly directed graphs. In the appendix (App. E.4), we show that our method performs well in directing edges on graphs that do not contain any errors and in a setting of noisy tags (App. E.5). We now inspect the impact of faults in the initial graph on the final outcome. To this end, we
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-09_334_1391_240_367}
+\captionsetup{labelformat=empty}
+\caption{Figure 5: Top: Tag Homogeneity for GPT4. A tag relation has high homogeneity (1) if variables of one tag consistently cause the other and low homogeneity ( 0 ) if the cause-effect relationship between these variables is random. We observe high homogeneity throughout all datasets. Hatched areas might appear white on screen due to anti-aliasing. See App. E.7 for high-resolution plots. Bottom: Tag Relations. Considering the most prominent tag pairs per dataset reveals high-level mechanisms present in the domain. We list tag pairs, with accuracy and support in brackets. Full list in App. E.7}
+\end{center}
+\end{figure}
+
+gradually introduce faults into the ground truth graph by either removing or flipping several edges and subsequently undirecting one of the remaining edges. We either evaluate all possible problem instances or sample 20,000 random instances in the case of larger graphs.
+
+Results for the removal and flipping of edges are shown in Fig. 4 We find tagging to remain stable under the mild induction of faults on larger datasets. Performance declines rapidly for small datasets as the remaining edges are no longer sufficient to build up robust evidence. Overall, performance is observed to suffer most from flipped edges, which introduce erroneous information and even affect larger datasets, while the removal of edges keeps performance stable except for the small Survey and Cancer datasets. We thus conclude that tagging further increases graph quality and achieves robust performance, even under the introduction of mild faults in the initial graph, thus answering Q2.
+
+\subsection*{4.3 Mining Abstract Causal Relations}
+In the previous sections, we considered how the informative value of tags can help direct edges within graphs. We now examine how knowledge about some given graphs can help with the identification of abstract causal relations. We consider the ground truth graphs of the previous sections as a data source to systematically discover relations between abstract causal concepts, which are realized by the annotated tags. Not all tags represent abstract concepts that are suited to infer causal relations. In Sec. 3, we discussed the homogeneity assumption (Assm. 1) that relates the homogeneity of tagging pairs to their predictive performance. In our previous experiments, we implicitly showed that this assumption holds for our selected datasets, as without it, edge recovery would not have been as successful. We take a closer look at the actual tagging homogeneity within the ground-truth graphs and invert the direction of inference by mining abstract causal relations from these observations.
+
+Tagging homogeneity of GPT-4 tags across different datasets is shown in Fig.5 (top). We find tagging pairs, where they exist, to generally yield high homogeneity with reasonable support across all considered datasets. As we initially instructed the LLMs to produce high-level tags, finding tag pairs with high homogeneity can, therefore, be thought of as extracting relations between highlevel concepts. In Fig 5 (bottom), we list some of the most exemplary tag pairs with the highest homogeneity and support among their respective datasets. Full listings of all discovered pairs with positive homogeneity are presented in App. E. 7 Among the identified relations, top-ranking examples fit commonly assumed knowledge. Overall, we find that tagging provides robust statistics that can not only help in directing edges within causal graphs but also provide useful insights into the higher-level relations within data. This answers Q3 affirmatively.
+
+\section*{5 Conclusion}
+We present a novel approach leveraging tagging information on the assumption of tag distribution consistency, relaxing previous typing assumptions. In our evaluation of several datasets of varying sizes, we determine tags using LLMs and show that this improves causal discovery results and directs under-directed edges with high accuracy. We observe a high consistency of tag relations and find that these relations correspond to high-level concepts that fit common knowledge.
+
+A limitation of our work is the trade-off between making correct predictions and abstaining from making a prediction. While we observed the best results when any evidence better than random is used for making predictions, this might lead to mistakes that might be dangerous in some applications. We also did not consider using background knowledge to include pre-established causal relations between tags. Other settings with confounders or unknown latent variables are left for future work.
+
+\section*{Acknowledgments and Disclosure of Funding}
+This work is supported by the Hessian Ministry of Higher Education, Research, Science and the Arts (HMWK; projects "The Third Wave of AI"). The authors acknowledge the support of the German Science Foundation (DFG) research grant "Tractable Neuro-Causal Models" (KE 1686/8-1). The Eindhoven University of Technology authors received support from their Department of Mathematics and Computer Science and the Eindhoven Artificial Intelligence Systems Institute.
+
+\section*{References}
+Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. Gpt-4 technical report. arXiv preprint arXiv:2303.08774, 2023.
+
+Steen A Andersson, David Madigan, and Michael D Perlman. A characterization of markov equivalence classes for acyclic digraphs. The Annals of Statistics, 25(2):505-541, 1997.
+
+Anthropic. Claude 3.5 sonnet, 2024. URL \href{https://www.anthropic.com/news/}{https://www.anthropic.com/news/} claude-3-5-sonnet Accessed: 2025-02-09.
+
+Jinze Bai, Shuai Bai, Yunfei Chu, Zeyu Cui, Kai Dang, Xiaodong Deng, Yang Fan, Wenbin Ge, Yu Han, Fei Huang, et al. Qwen technical report. arXiv preprint arXiv:2309.16609, 2023.
+
+Drew H Bailey, Alexander J Jung, Adriene M Beltz, Markus I Eronen, Christian Gische, Ellen L Hamaker, Konrad P Kording, Catherine Lebel, Martin A Lindquist, Julia Moeller, et al. Causal inference on human behaviour. Nature human behaviour, 8(8):1448-1459, 2024.
+
+Elizabeth Baraff Bonawitz, Darlene Ferranti, Rebecca Saxe, Alison Gopnik, Andrew N Meltzoff, James Woodward, and Laura E Schulz. Just do it? investigating the gap between prediction and action in toddlers' causal inferences. Cognition, 115(1):104-117, 2010.
+
+Mouad El Bouchattaoui, Myriam Tami, Benoit Lepetit, and Paul-Henry Cournède. Causal contrastive learning for counterfactual regression over time. Advances in Neural Information Processing Systems, 2024.
+
+Philippe Brouillard, Sébastien Lachapelle, Alexandre Lacoste, Simon Lacoste-Julien, and Alexandre Drouin. Differentiable causal discovery from interventional data. Advances in Neural Information Processing Systems, 33:21865-21877, 2020.
+
+Philippe Brouillard, Perouz Taslakian, Alexandre Lacoste, Sébastien Lachapelle, and Alexandre Drouin. Typing assumptions improve identification in causal discovery. In Conference on Causal Learning and Reasoning, pages 162-177. PMLR, 2022.
+
+Haoang Chi, He Li, Wenjing Yang, Feng Liu, Long Lan, Xiaoguang Ren, Tongliang Liu, and Bo Han. Unveiling causal reasoning in large language models: Reality or mirage? In The Thirty-eighth Annual Conference on Neural Information Processing Systems, 2024.
+
+David Maxwell Chickering. Optimal structure identification with greedy search. Journal of machine learning research, 3(Nov):507-554, 2002.
+
+Kristy Choi, Chris Cundy, Sanjari Srivastava, and Stefano Ermon. Lmpriors: Pre-trained language models as task-specific priors. arXiv preprint arXiv:2210.12530, 2022.
+
+Juan L Gamella and Christina Heinze-Deml. Active invariant causal prediction: Experiment selection through stability. Advances in Neural Information Processing Systems, 33:15464-15475, 2020.
+
+Gaël Gendron, Qiming Bao, Michael Witbrock, and Gillian Dobbie. Large language models are not strong abstract reasoners. arXiv preprint arXiv:2305.19555, 2023.
+
+Ruocheng Guo, Lu Cheng, Jundong Li, P Richard Hahn, and Huan Liu. A survey of learning causality with data: Problems and methods. ACM Computing Surveys (CSUR), 53(4):1-37, 2020.
+
+Isabelle Guyon, Alexander Satnikov, and Constantin Aliferis. Time series analysis with the causality workbench. In NIPS Mini-Symposium on Causality in Time Series, pages 115-139. PMLR, 2011.
+
+Alain Hauser and Peter Bühlmann. Characterization and greedy learning of interventional markov equivalence classes of directed acyclic graphs. The Journal of Machine Learning Research, 13(1): 2409-2464, 2012.
+
+Patrik Hoyer, Dominik Janzing, Joris M Mooij, Jonas Peters, and Bernhard Schölkopf. Nonlinear causal discovery with additive noise models. Advances in neural information processing systems, 21, 2008.
+
+Zhijing Jin, Yuen Chen, Felix Leeb, Luigi Gresele, Ojasv Kamal, LYU Zhiheng, Kevin Blin, Fernando Gonzalez Adauto, Max Kleiman-Weiner, Mrinmaya Sachan, et al. Cladder: Assessing causal reasoning in language models. In Thirty-seventh conference on neural information processing systems, 2023.
+
+Thomas Jiralerspong, Xiaoyin Chen, Yash More, Vedant Shah, and Yoshua Bengio. Efficient causal graph discovery using large language models. arXiv preprint arXiv:2402.01207, 2024.
+
+Nitish Joshi, Abulhair Saparov, Yixin Wang, and He He. Llms are prone to fallacies in causal inference. arXiv preprint arXiv:2406.12158, 2024.
+
+Anita Keshmirian, Moritz Willig, Babak Hemmatian, Kristian Kersting, Ulrike Hahn, and Tobias Gerstenberg. Chain versus common cause: Biased causal strength judgments in humans and large language models. In Proceedings of the Annual Meeting of the Cognitive Science Society, volume 46, 2024.
+
+Emre Kıcıman, Robert Ness, Amit Sharma, and Chenhao Tan. Causal reasoning and large language models: Opening a new frontier for causality. arXiv preprint arXiv:2305.00050, 2023.
+
+Andrew Lampinen, Stephanie Chan, Ishita Dasgupta, Andrew Nam, and Jane Wang. Passive learning of active causal strategies in agents and language models. Advances in Neural Information Processing Systems, 36, 2024.
+
+Stephanie Long, Tibor Schuster, and Alexandre Piché. Can large language models build causal graphs? In NeurIPS 2022 Workshop on Causality for Real-world Impact.
+
+Stephanie Long, Alexandre Piché, Valentina Zantedeschi, Tibor Schuster, and Alexandre Drouin. Causal discovery with language models as imperfect experts. In ICML 2023 Workshop on Structured Probabilistic Inference \& Generative Modeling, 2023.
+
+Vikash Mansinghka, Charles Kemp, Thomas Griffiths, and Joshua Tenenbaum. Structured priors for structure learning. arXiv preprint arXiv:1206.6852, 2012.
+
+Saurabh Mathur, Veerendra P Gadekar, Rashika Ramola, Peixin Wang, Ramachandran Thiruvengadam, David M Haas, Shinjini Bhatnagar, Nitya Wadhwa, Garbhini Study Group, Predrag Radivojac, et al. Modeling multiple adverse pregnancy outcomes: Learning from diverse data sources. In International Conference on Artificial Intelligence in Medicine, pages 293-302. Springer, 2024.
+
+Christopher Meek. Causal inference and causal explanation with background knowledge. In Proc. Conf. on Uncertainty in Artificial Intelligence (UAI-95), pages 403-410, 1995.
+
+Andrew N Meltzoff. Infants' causal learning: Intervention, observation, imitation. 2007.\\
+Joris M Mooij, Dominik Janzing, Tom Heskes, and Bernhard Schölkopf. On causal discovery with cyclic additive noise models. Advances in neural information processing systems, 24, 2011.
+
+OpenAI. Gpt-4o. \href{https://openai.com/index/hello-gpt-4o/}{https://openai.com/index/hello-gpt-4o/}, 2024. Accessed: 2025-02-09.
+
+Judea Pearl. Causality. Cambridge university press, 2009.\\
+Emilija Perković, Markus Kalisch, and Maloes H Maathuis. Interpreting and using cpdags with background knowledge. arXiv preprint arXiv:1707.02171, 2017.
+
+Jonas Peters and Peter Bühlmann. Structural intervention distance for evaluating causal graphs. Neural computation, 27(3):771-799, 2015.
+
+Jonas Peters, Peter Bühlmann, and Nicolai Meinshausen. Causal inference by using invariant prediction: identification and confidence intervals. Journal of the Royal Statistical Society Series B: Statistical Methodology, 78(5):947-1012, 2016.
+
+Jonas Peters, Dominik Janzing, and Bernhard Schölkopf. Elements of causal inference: foundations and learning algorithms. The MIT Press, 2017.
+
+Bernhard Schölkopf. Causality for machine learning. In Probabilistic and Causal Inference: The Works of Judea Pearl, pages 765-804. 2022.
+
+Bernhard Schölkopf, Francesco Locatello, Stefan Bauer, Nan Rosemary Ke, Nal Kalchbrenner, Anirudh Goyal, and Yoshua Bengio. Toward causal representation learning. Proceedings of the IEEE, 109(5):612-634, 2021.
+
+Marco Scutari. Learning bayesian networks with the bnlearn r package. Journal of statistical software, 35:1-22, 2010.
+
+Shohei Shimizu, Patrik O Hoyer, Aapo Hyvärinen, Antti Kerminen, and Michael Jordan. A linear non-gaussian acyclic model for causal discovery. Journal of Machine Learning Research, 7(10), 2006.
+
+Peter Spirtes and Clark Glymour. An algorithm for fast recovery of sparse causal graphs. Social science computer review, 9(1):62-72, 1991.
+
+Peter Spirtes, Clark N Glymour, Richard Scheines, and David Heckerman. Causation, prediction, and search. MIT press, 2000.
+
+Erdogan Taskesen. Learning Bayesian Networks with the bnlearn Python Package., January 2020. URL \href{https://erdogant.github.io/bnlearn}{https://erdogant.github.io/bnlearn}.
+
+Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971, 2023.
+
+Ioannis Tsamardinos, Laura E Brown, and Constantin F Aliferis. The max-min hill-climbing bayesian network structure learning algorithm. Machine learning, 65(1):31-78, 2006.
+
+Thomas Verma and Judea Pearl. An algorithm for deciding if a set of observed independencies has a causal explanation. In Uncertainty in artificial intelligence, pages 323-330. Elsevier, 1992.
+
+Thomas S Verma and Judea Pearl. Equivalence and synthesis of causal models. In Probabilistic and causal inference: The works of Judea Pearl, pages 221-236. 2022.
+
+Zefan Wang, Zichuan Liu, Yingying Zhang, Aoxiao Zhong, Jihong Wang, Fengbin Yin, Lunting Fan, Lingfei Wu, and Qingsong Wen. Rcagent: Cloud root cause analysis by autonomous agents with tool-augmented large language models. In Proceedings of the 33rd ACM International Conference on Information and Knowledge Management, pages 4966-4974, 2024.
+
+Matej Zečević, Devendra Dhami, Athresh Karanam, Sriraam Natarajan, and Kristian Kersting. Interventional sum-product networks: Causal inference with tractable probabilistic models. Advances in neural information processing systems, 34:15019-15031, 2021.
+
+Matej Zečević, Moritz Willig, Devendra Singh Dhami, and Kristian Kersting. Causal parrots: Large language models may talk causality but are not causal. Transactions on Machine Learning Research, 2023.
+
+LYU Zhiheng, Zhijing Jin, Rada Mihalcea, Mrinmaya Sachan, and Bernhard Schölkopf. Can large language models distinguish cause from effect? In UAI 2022 Workshop on Causal Representation Learning, 2022.
+
+\section*{Tagged for Direction: Pinning Down Causal Edge Directions with Precision (Supplementary Material)}
+This appendix is structured as follows. First, we go into a theoretical analysis of our tagging approach in App. A Then, we describe a possible extension of the approach with a specificity prior in App. B Next, we present the pseudo-code for our approach in App. C. App. Dprovides detailed information on the LLM prompts used to assign types and tags in this paper. Finally, we present extensive experimental details and results in App. E.
+
+\section*{A Theoretical Analysis}
+Let us say that two variables $X_{i}$ and $X_{j}$ are only tagged with a single tag each, i.e., $\left(X_{i}, X_{j}\right) \in \mathbf{E}^{\mathcal{Y}, \mathrm{t}^{a}, \mathrm{t}^{b}}$ with $\operatorname{tag}\left(X_{i}\right)=\mathbf{t}_{i}=\left\{\mathrm{t}^{a}\right\}$ and tag $\left(X_{j}\right)=\mathbf{t}_{j}=\left\{\mathrm{t}^{b}\right\}$. Consider the case that $X_{i} \rightarrow X_{j}$ is true, but unknown. The tag informative value $I^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)$ describes the probability provided by the tag pair ( $t^{a}, t^{b}$ ) according to which $t^{a}$ is a cause of $t^{b}$. Thus, correctly predicting the direction of an undirected edge follows a simple Bernoulli distribution and is correct with probability $d_{i j}^{\prime} \mathcal{Y}=I^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)$ (see Eq. 2). For ease of notation, we assume that all considered tag pairs have evidence ( $o^{\mathcal{Y}}\left(t^{a}, t^{b}\right)=1, \forall t^{a}, t^{b}$ ) and that the edge-specific noise $N_{i j}$ does not influence the prediction.\\
+For assigning tags, we assume a noisy oracle that assigns tags that result in particular accuracy of $\hat{A}:=\mathbb{E}\left(I^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)\right)$. Generally, we assume that the tag informative values follow a beta distribution, the conjugate prior of the Bernoulli distribution:
+
+
+\begin{equation*}
+I^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right) \sim \operatorname{Beta}(\alpha, \beta) \text { with } \hat{A}=\frac{\alpha}{\alpha+\beta} \tag{7}
+\end{equation*}
+
+
+for some $\alpha, \beta \in \mathbb{R}$. Here, $\alpha$ and $\beta$ can be seen as some underlying evidence for directing the edge $X_{i}-X_{j}$ in either direction. Following Assumption 1, according to which the tag informative values of different datasets converge towards each other (i.e., tag relations observed in some data help with correctly predicting the edges of new data), we can assume that, on average, $\alpha>\beta$ if $X_{i} \rightarrow X_{j}$ and vice versa.
+
+Under this setting, we are now interested in the probability of correctly predicting the edge direction using our tagging approach $\mathbb{P}\left[d_{i j}^{\prime} \mathcal{Y}>0.5\right]$. In the case $n=\left|\mathbf{t}_{i} \times \mathbf{t}_{j}\right|=1$, we directly use the only tag informative value for our prediction:
+
+
+\begin{equation*}
+\mathbb{P}\left[\hat{p}_{1}\left(X_{i} \rightarrow X_{j}\right)>0.5\right]=\mathbb{P}\left[I^{\mathcal{Y}}\left(\mathrm{t}^{a}, \mathrm{t}^{b}\right)>0.5\right]=1-\mathcal{I}_{0.5}(\alpha, \beta) \tag{8}
+\end{equation*}
+
+
+where $\mathcal{I}_{0.5}(\alpha, \beta)=\frac{\int_{0}^{x} u^{\alpha-1}(1-u)^{\beta-1} d u}{\int_{0}^{1} u^{\alpha-1}(1-u)^{\beta-1} d u}$ is the regularized incomplete beta function i.e., the cumulative distribution function (CDF) of the beta distribution. Intuitively, for a single tag pair, the probability of correctly predicting the edge $X_{i} \rightarrow X_{j}$ when $\alpha>\beta$ is the same as the probability of sampling a probability (tag informative value) higher than 0.5 from the underlying beta distribution.\\
+The previous case is similar to the typing scenario, since we only considered a single tag pair influencing the decision. Let us now consider the more general scenario with multiple tags: $\mathbf{t}_{i}= \left\{\mathrm{t}_{1}^{a}, \mathrm{t}_{2}^{a}, \ldots, \mathrm{t}_{k}^{a}\right\}$ and $\mathbf{t}_{j}=\left\{\mathrm{t}_{1}^{b}, \mathrm{t}_{2}^{b}, \ldots, \mathrm{t}_{l}^{b}\right\}$, resulting in $n=\left|\mathbf{t}_{i} \times \mathbf{t}_{j}\right|$ tag pairs and tag informative values $\mathbf{I}^{\mathcal{Y}}=\left\{I_{1}^{\mathcal{Y}}, I_{2}^{\mathcal{Y}}, \ldots, I_{n}^{\mathcal{Y}}\right\}$. Our tagging approach makes the following prediction:
+
+
+\begin{equation*}
+d_{i j}^{\prime \mathcal{Y}}=\frac{1}{n} \sum_{m=1}^{n} I_{n}^{\mathcal{Y}} \tag{9}
+\end{equation*}
+
+
+We can see that the mean is the same as the mean of the underlying beta distribution
+
+
+\begin{equation*}
+E\left[d_{i j}^{\prime} \mathcal{Y}\right]=E\left[\frac{1}{n} \sum_{m=1}^{n} \operatorname{Beta}(\alpha, \beta)\right]=\frac{1}{n} \sum_{m=1}^{n} E[\operatorname{Beta}(\alpha, \beta)]=\frac{1}{n} \sum_{m=1}^{n} \frac{\alpha}{\alpha+\beta}=\frac{\alpha}{\alpha+\beta}, \tag{10}
+\end{equation*}
+
+
+\footnotetext{${ }^{2}$ We use $\mathcal{I}$ instead of the commonly used $I$ to separate it from the tag informative value $I$.
+}
+which then tells us that we are making the correct predictions in the mean as $\mathbb{P}\left[\frac{\alpha}{\alpha+\beta}>0.5\right]$ is true following our assumption that $\alpha>\beta$. More generally, we know that the probability of correctly predicting an edge using tagging is
+
+
+\begin{equation*}
+\mathbb{P}\left[d_{i j}^{\prime \mathcal{Y}}>0.5\right]=\mathbb{P}\left[\frac{1}{n} \sum_{m=1}^{n} I_{n}^{\mathcal{Y}}>0.5\right]=1-F_{0.5}^{n}(\alpha, \beta), \tag{11}
+\end{equation*}
+
+
+where $F_{0.5}^{n}(\alpha, \beta)$ is the CDF of the distribution of the average of beta-distributed random variables ( $I^{\mathcal{Y}}$ ) to which there exists no closed-form expression. However, given the variance of the beta distribtion $\operatorname{Var}\left[I^{\mathcal{Y}}\right]=\frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1)}$, we can make use of the Central Limit Theorem (CLT), according to which the variance of our prediction is normally distributed with
+
+
+\begin{equation*}
+\operatorname{Var}\left[d_{i j}^{\prime} \boldsymbol{\mathcal { Y }}\right]=\operatorname{Var}\left[\frac{1}{n} \sum_{m=1}^{n} I_{n}^{\boldsymbol{\mathcal { Y }}}\right]=\frac{\alpha \beta}{(\alpha+\beta)^{2}(\alpha+\beta+1) n} . \tag{12}
+\end{equation*}
+
+
+Since $\operatorname{Var}\left[d_{i}^{\prime} \mathcal{y}\right]$ becomes smaller for larger $n$, we know that the $\operatorname{CDF} F^{n}(\alpha, \beta)$ will continually amass more density around the mean (as it is normally distributed following the CLT). Therefore, $F_{0.5}^{n}(\alpha, \beta)$ will get smaller, the more $n$ increases, since the mean is not in the interval $[0,0.5]$. In other words, the more tag pairs we utilize for our prediction, the more likely it is that our prediction is correct, exceeding the probability of only using a single tag pair or type. In the theoretical setting of $n \rightarrow \infty$, it even follows that $\operatorname{Var}\left[d_{i}^{\prime}{ }_{j}^{\prime}\right]_{n \rightarrow \infty}=0$ and, therefore, $\mathbb{P}\left[d_{i}^{\prime} \mathcal{Y}>0.5\right]=1$.\\
+The opposite case of $X_{i} \leftarrow X_{j}$ follows by analogy.
+
+\section*{B Specificity Prior}
+Upon considering the directionality of edges, one might want to weigh in tagging pairs ( $t^{a}, t^{b}$ ) more strongly, which feature a higher specificity. In general, specific tags might be used to indicate variables with deviating behavior, e.g., variables featuring different causal dynamics in contrast to the overall system. Such specific tags might indicate local environments where global assumptions might not hold, and upon encountering such tags, we want to prioritize them more strongly in our decision. We base the prior distribution on the Geometric series, counting the number of nodes assigned to any of the tags:
+
+
+\begin{equation*}
+\hat{p}_{a b}^{\mathrm{spec}}=\frac{1}{2^{\left|\left\{X_{i} \in \mathbf{X} \mid \mathrm{t}^{a} \in \operatorname{tagged}\left(X_{i}\right)\right\}\right|+\left\{X_{i} \in \mathbf{X} \mid \mathrm{t}^{b} \in \operatorname{tagged}\left(X_{i}\right)\right\} \mid-1}} . \tag{13}
+\end{equation*}
+
+
+Generally, the prior might or might not be used based on whether the specificity assumption is assumed to hold for the specific application. Thus, it is a hyperparameter for our algorithm. In case the prior is used, it is multiplied to the respective probability; otherwise, $\hat{p}_{a b}^{\text {spec }}$ is set to one:
+
+
+\begin{equation*}
+\hat{p}_{a b}^{\prime}=p_{a b}^{\text {spec }} \cdot \hat{p}_{a b} . \tag{14}
+\end{equation*}
+
+
+Note that Eq. 5 now requires a normalization term, since $\hat{p}_{a b}^{\prime}+\hat{p}_{b a}^{\prime}$ might no longer add up to one. We repeat the corresponding equation with normalization in the following:
+
+
+\begin{equation*}
+Q\left(\mathrm{E}_{i j}\right)=\frac{\sum_{\mathrm{t}^{a} \in \mathbf{t}_{i}, \mathrm{t}^{b} \in \mathbf{t}_{j}} \hat{p}_{a b}^{\prime} \cdot o\left(t^{a}, t^{b}\right)}{\sum_{\mathrm{t}^{a} \in \mathbf{t}_{i}, \mathrm{t}^{b} \in \mathbf{t}_{j}} \hat{p}_{a b}^{\prime}+\hat{p}_{b a}^{\prime}} \tag{15}
+\end{equation*}
+
+
+\section*{C Algorithm Pseudo Code}
+We introduce some methods required in our approach in Alg. 1 and then provide the pseudo-code for the actual tagging informed edge direction in Alg. 2
+
+\begin{verbatim}
+Algorithm 1 Tagging Helper Procedures
+    procedure Collect Evidence( $\mathcal{G}, \mathbf{t}$ )
+        $\mathbf{E} \leftarrow$ zero matrix of size $|\mathbf{t}| \times|\mathbf{t}|$
+        for each directed edge $(u, v) \in \mathcal{G}$ do
+            for each tag $t_{u} \in \mathbf{t}[u]$ do
+                for each tag $t_{v} \in \mathbf{t}[v]$ do
+                    $\mathbf{E}\left[t_{u}, t_{v}\right] \leftarrow \mathbf{E}\left[t_{u}, t_{v}\right]+1$
+                end for
+            end for
+        end for
+        return E
+    end procedure
+    procedure Find Most Promising Edge(Edges, t, E, OnlyBackward)
+        BestEdge ← None
+        BestProb $\leftarrow 0$
+        for each edge $(u, v) \in$ Edges do
+            ForwardScore, BackwardScore, ForwardCount, BackwardCount $\leftarrow 0$
+            for each tag $t_{u} \in \mathbf{t}[u] \mathbf{d o}$
+                for each tag $t_{v} \in \mathbf{t}[v] \mathbf{d o}$
+                    if $t_{u} \neq t_{v}$ then $\quad \triangleright$ Skip relations between identical tags
+                        Forward $\leftarrow \mathbf{E}\left[t_{u}, t_{v}\right]$
+                        if not(IncludeCurrentEdgeAsEvidence) then ▷ Parameter for redirecting
+    edges
+                            Forward $\leftarrow$ Forward $-1 \quad \triangleright$ Exclude the current edge
+                        end if
+                        Backward $\leftarrow \mathbf{E}\left[t_{v}, t_{u}\right]$
+                        if SpecificityPrior then $\quad$ - Parameter for applying the specificity prior
+                            $p^{\text {spec }} \leftarrow$ CalcSpecificityPrior $\left(t_{u}, t_{v}\right) \quad \triangleright$ Eq. 13
+                        else
+                            $p^{\text {spec }} \leftarrow 1$
+                        end if
+                        ForwardScore $\leftarrow$ Forward $\cdot p^{\text {spec }}$
+                        BackwardScore $\leftarrow$ Backward $\cdot p^{\text {spec }}$
+                        ForwardCount ← ForwardCount + ForwardScore
+                        BackwardCount ← BackwardCount + BackwardScore
+                    end if
+                end for
+            end for
+            if ForwardCount + BackwardCount < MinSamples then ▷ Minimum tag pairs, we use
+    either 1 or 2
+                ForwardProb $\leftarrow 0.5$
+            else
+                ForwardProb $\leftarrow \frac{\text { ForwardScore }}{\text { ForwardScore+BackwardScore }}$
+            end if
+            BackwardProb ⟵ 1 - BackwardProb
+            if not(BackwardOnly) and ForwardProb $>$ BestProb then ▷ Ignore forward direction
+    for redirections
+                BestEdge $\leftarrow(u, v)$
+                BestProb $\leftarrow$ ForwardProb
+            end if
+            if BackwardProb > BestProb then
+                BestEdge $\leftarrow(v, u)$
+                BestProb ← BackwardProb
+            end if
+        end for
+        return BestEdge, BestProb
+    end procedure
+\end{verbatim}
+
+\begin{verbatim}
+Algorithm 2 Tagging Informed Edge Direction
+    procedure Tagging Informed Edge Directioning(CPDAG $\mathcal{G}$, Tags $\mathbf{t}$ )
+        $\mathbf{E} \leftarrow$ Collect Evidence $(\mathcal{G}, \mathbf{t})$
+        if RedirectEdges then $\quad$ ▷ Parameter: consider redirectioning of edges?
+            Loop ← True
+            DirEdges $\leftarrow$ directed_edges $(\mathcal{G})$
+            RedirEdges ← []
+            IterationThreshold $\leftarrow 0$
+            while Loop and IterationThreshold < 100 do ▷ Stop after 100 iterations to avoid infinite
+    loops
+                Loop ← False
+                $(u, v), p \leftarrow$ Find Most Promising Edge(DirEdges, $\mathbf{t}, \mathbf{E}$, True)
+                if $p>0.6$ then
+                    $\mathcal{G}^{*} \leftarrow \mathcal{G} \cdot \operatorname{direct}((u, v)) \quad \triangleright$ Redirect edge
+                    if is_acyclic $\left(\mathcal{G}^{*}\right)$ then ▷ Do not redirect
+                        DirEdges $\leftarrow$ DirEdges.remove $((u, v)) \quad \triangleright$ Do not consider same edge again
+    next
+                    else
+                        $\mathcal{G} \leftarrow \operatorname{copy}\left(\mathcal{G}^{*}\right) \quad \triangleright$ Accept redirection
+                        DirEdges $\leftarrow$ directed_edges $(\mathcal{G})$
+                        if RedirectStrategy $==0$ then $\quad \triangleright$ Update evidence after each step
+                            $\mathbf{E} \leftarrow \operatorname{Collect} \operatorname{Evidence}(\mathcal{G}, \mathbf{t})$
+                        else $\quad \triangleright$ RedirectStrategy $==1$
+                            RedirEdges $\leftarrow$ RedirEdges.append $((u, v))$
+                            DirEdges $\leftarrow$ DirEdges.remove_all(RedirEdges) $\quad \triangleright$ Remove already
+    redirected edges
+                        end if
+                    end if
+                    if RedirectStrategy $==0$ then
+                        IterationThreshold ⟵ IterationThreshold + 1
+                    end if
+                    Loop ⟵ True
+                end if
+            end while
+            $\mathbf{E} \leftarrow \operatorname{Collect} \operatorname{Evidence}(\mathcal{G}, \mathbf{t})$
+        end if
+        while len(undirected_edges( $\mathcal{G}$ )) $>0$ do $\quad \triangleright$ As long as there are undirected edges
+            $(u, v), p \leftarrow$ Find Most Promising Edge(undirected_edges $(\mathcal{G}), \mathbf{t}, \mathbf{E}$, False)
+            if $p>0.5$ then
+                $\mathcal{G}^{*} \leftarrow \mathcal{G} . \operatorname{direct}((u, v))$
+                if $\mathcal{G}^{*}$.is_acyclic() then ▷ If the direction would introduce cycles...
+                    $\mathcal{G} \leftarrow \mathcal{G} \cdot \operatorname{direct}((v, u)) \quad \triangleright \ldots$ instead add the edge in the opposite direction
+                else
+                    $\mathcal{G} \leftarrow \mathcal{G}^{*} \quad \triangleright$ Otherwise, accept the directed edge
+                end if
+                if AlwaysMeek then ▷ Parameter, to apply Meek Rules after every edge direction
+    step
+                    $\mathcal{G} \leftarrow \operatorname{Meek}(\mathcal{G}) \quad \triangleright$ Meek Rules
+                end if
+            else $\quad \triangleright$ If $p=0.5$ (can not be smaller), keep remaining edges undirected
+                break
+            end if
+        end while
+        $\mathcal{G} \leftarrow \operatorname{Meek}(\mathcal{G}) \quad \triangleright$ Always apply one final Meek Rules
+        return $\mathcal{G}$
+    end procedure
+\end{verbatim}
+
+\section*{D LLM Prompts}
+In the following, we describe the details of LLM querying. The following specific models where queried: "Llama-3.3-70B-Instruct", "claude-3-5-sonnet-20241022", "gpt-4-0613", "gpt-4o-2024-08-06" and "Qwen2.5-72B-Instruct". All answers are generated using the same system prompt and either the following tagging or typing instructions. Model temperature was set to zero. (Note that the Claude API does not guarantee a deterministic output.) All LLM answers are included within the code repository. Within every prompt, the \{variables\} fields were replaced by a comma-separated list of the individual dataset's variable names.
+
+You are an expert in annotating variables to provide additional information that helps to support a causal discovery algorithm.
+
+System Prompt
+
+A tag is a single word or short phrase that describes a variable. Tags should be general enough to be applicable to multiple variables but specific enough to identify differences between similar variables. Tags will be used to identify causal directions between variables. Therefore, the individual sets of tags per variable should be discriminative enough to inform the algorithm. Variables can have multiple tags. \textbackslash n Consider the following variables: \{variables\}. $\backslash \mathrm{n} \backslash \mathrm{n}$
+
+Please generate a list of tags that can be assigned to one or multiple variables. Generate the number of tags necessary to strike a good balance between expressivity and specificity. Avoid duplicate tags that contain the same set of variables. Reply with one line per tag, where each line starts with the name of the tag, followed by a colon, and then a comma-separated list of variables that have that tag. The output should be machine parsable. For that reason, do not include any explanations or additional comments.
+
+Tagging Instruction Prompt
+
+A type is a single word or short phrase that describes a variable. Types should be general enough to be applicable to multiple variables but specific enough to identify differences between similar variables. Types will be used to identify causal directions between variables. Therefore, the individual types should be discriminative enough to inform the algorithm. Variables are assigned to a single type only. $\backslash n$ Consider the following variables: \{variables\}. \textbackslash n\textbackslash n
+
+Please generate a list of types that can be assigned to one or multiple variables. Generate the number of types necessary to strike a good balance between expressivity and specificity. Reply with one line per type, where each line starts with the name of the type, followed by a colon, and then a comma-separated list of variables that belong to that type. Make sure that no variable appears in more than one the lists. The output should be machine parsable. For that reason, do not include any explanations or additional comments.
+
+Typing Instruction Prompt
+
+\section*{E Further Experimental Results}
+In this section, we provide additional details on the experiments. Here, we first give more information on the best parameter configurations of our main evaluation and the difference between these with respect to different LLMs (Sec. E.1). Then, we show the results on all datasets, supplementing the purely ranking-based results of the main paper (Sec. E.2). We consider error-free settings by investigating how well our tagging-based method performs on the ground-truth CPDAG (Sec. E.3) and in an ablation study where we undirect some edges starting from the ground-truth graph (Sec. E.4). After that, we show another experiment where we add noise to the tag assignment and investigate the effect on the tagging accuracy (Sec. E.5). Lastly, we complement our evaluations of the main paper on graph faults and homogeneity by providing a larger amount of experimental results in Sec. E. 6 and Sec. E.7, respectively.
+
+\section*{E. 1 Best Parameter Configurations}
+There are a total of 400 possible parameter configurations per dataset and seed. In Tab. 2, we show the 10 best parameter configurations overall. As in the main paper, these are determined by their average $\mathrm{F}_{1}$ score across all datasets and seeds to enable easy comparability between datasets (since SHD and SID values tend to be much larger for bigger datasets). It can be seen that the top ten scores are not far from each other, indicating a certain amount of robustness of our results with respect to the set of all possible parameters. In Tab. 3, we consider the best parameter configuration for each LLM. We observe that the choice of LLM used for tagging does not appear to play a crucial role in obtaining good results.
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|l|}
+\hline
+LLM & Min-Samples & Fewer Tags & S. Prior & Always Meek & Redirect & Strategy & Include Edge & $\mathrm{F}_{1}$ \\
+\hline
+GPT-4 & 1 & False & False & True & False & - & - & 0.7881 \\
+\hline
+GPT-4 & 1 & False & True & True & False & - & - & 0.7869 \\
+\hline
+GPT-4 & 1 & False & False & True & True & 1 & True & 0.7864 \\
+\hline
+GPT-4 & 1 & False & False & True & True & 0 & True & 0.7864 \\
+\hline
+GPT-4 & 1 & False & True & True & True & 1 & True & 0.7852 \\
+\hline
+GPT-4 & 1 & False & True & True & True & 0 & True & 0.7852 \\
+\hline
+GPT-4 & 1 & False & True & False & True & 1 & True & 0.7840 \\
+\hline
+GPT-4 & 1 & True & False & True & False & - & - & 0.7839 \\
+\hline
+GPT-4 & 1 & True & True & True & False & - & - & 0.7839 \\
+\hline
+GPT-4 & 1 & True & False & True & True & 1 & True & 0.7832 \\
+\hline
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 2: $\mathbf{1 0}$ Best Configurations by $\mathbf{F}_{\mathbf{1}}$ score. The parameters (columns) are: which LLM is used for determining tags (LLM), the number of tag combinations that must have been observed in order to allow for directing an edge (Min-Samples), whether to include all tags or remove those that are only assigned to single variables (Fewer Tags), whether to apply the specificity prior (S. Prior, see Eq. 13), whether to apply Meek rules after every direction or only at the end (Always Meek), whether to redirect edges at all (Redirect), which strategy to use for updating the evidence during edge redirection (Strategy; with 0 indicating iterative updates and 1 no updates), and whether to include the edge that is under consideration for being redirected as part of the evidence to decide on redirection (Include Edge). The score in the final column is the average $\mathrm{F}_{1}$ score across all seeds and datasets. All results are achieved on the CPDAG from GES (results on the CPDAG output by PC performed worse).}
+\end{center}
+\end{table}
+
+\section*{E. 2 Evaluation Results on All Datasets}
+In the main body, we show the rankings of our evaluation in Tab. 1. We now include the detailed results in Tab. 4 , where we show the unranked evaluation results per dataset. Here, we also include some steps of $t$-Propagation as proposed in Brouillard et al. [2022]. However, we were unable to apply the last step of $t$-Propagation, where all type-consistent graphs are enumerated and aggregated into a final graph, since type consistency is not always satisfied using our datasets and types. The results for t-Propagation in the table are thus obtained by skipping this step (only propagating types and applying Meek rules), which turned out to perform rather badly on top of PC, while, on average, being close to our method on GES. However, note that in smaller datasets where only a few edges need to be directed, using tags instead of types might not be necessary, as the information given by types could be sufficient. We do observe that our tagging approach obtains the best results on most of
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|l|}
+\hline
+LLM & Min-Samples & Fewer Tags & S. Prior & Always Meek & Redirect & Strategy & Include Edge & $\mathrm{F}_{1}$ \\
+\hline
+GPT-4 & 1 & False & False & True & False & - & - & 0.7881 \\
+\hline
+Qwen-2.5 & 1 & False & True & False & True & 1 & True & 0.7840 \\
+\hline
+Claude-3.5 Sonnet & 1 & False & False & True & True & 0 & True & 0.7800 \\
+\hline
+Llama-3.3 & 1 & False & False & True & True & 0 & True & 0.7794 \\
+\hline
+GPT-4o & 1 & False & True & True & False & - & - & 0.7536 \\
+\hline
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 3: Best Configurations by $\mathbf{F}_{\mathbf{1}}$ score per LLM. The parameters (columns) are: which LLM is used for determining tags (LLM), the number of tag combinations that must have been observed in order to allow for directing an edge (Min-Samples), whether to include all tags or remove those that are only assigned to single variables (Fewer Tags), whether to apply the specificity prior (S. Prior, see Eq. 13), whether to apply Meek rules after every direction or only at the end (Always Meek), whether to redirect edges at all (Redirect), which strategy to use for updating the evidence during edge redirection (Strategy; with 0 indicating iterative updates and 1 no updates), and whether to include the edge that is under consideration for being redirected as part of the evidence to decide on redirection (Include Edge). The score in the final column is the average $\mathrm{F}_{1}$ score across all seeds and datasets. All results are achieved on the CPDAG from GES (results on the CPDAG output by PC performed worse). The performance of all LLMs is relatively close to each other, with some deviations in the optimal parameter for their respective configuration.}
+\end{center}
+\end{table}
+
+the larger datasets, indicating an increased benefit of tagging over typing on larger, more complex datasets. This also aligns with our theoretical analysis in App. A.
+
+\section*{E. 3 Evaluation on Ground-Truth CPDAG}
+In addition to our main evaluation, we considered the ground-truth CPDAG and applied tagging to discover whether our approach successfully directs undirected edges when the causal discovery algorithm is applied before identifying the CPDAG without error. Tab. 5 shows that tagging does, on average, improve the given CPDAGs by directing more undirected edges correctly than incorrectly. In addition to the ranked results, we include absolute scores on all datasets in Tab.6.
+
+\section*{E. 4 Directing of Undirected Edges}
+We conduct an additional experiment to investigate how our approach manages to direct undirected edges in settings without errors. To this end, we use the ground-truth graphs and undirect 1 to 6 edges. In the same manner as in Sec.4.2, we either consider all possible combinations or 20,000 random edge combinations per dataset and number of edges to undirect. Different from the experiment in the main body, we also always apply Meek rules, simulating the full application of our approach. To ensure that the reported results correspond to edges directed by our algorithm, we disregard all scenarios where Meek rules would direct an edge before our algorithm is applied. Since this happens very frequently, many datasets have very few or no samples. We report results in Tab. 7, containing the number of correct and incorrect predictions, as well as the number of edges that our approach kept as undirected edges. Overall, performance often decays with the increasing number of undirected edges but still remains relatively stable.
+
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|}
+\hline
+Evaluation Results & SHD & $\mathrm{SHD}_{\text {double }}$ & $\mathrm{SID}_{\text {min }}$ & $\mathrm{SID}_{\text {max }}$ & Precision & Recall & $\mathrm{F}_{1}$ \\
+\hline
+Dataset Cancer &  &  &  &  &  &  &  \\
+\hline
+PC & $2.00 \pm 0.45$ & $3.90 \pm 0.70$ & $9.60 \pm 1.56$ & $9.60 \pm 1.56$ & $0.51 \pm 0.09$ & $0.50 \pm 0.11$ & $0.50 \pm 0.10$ \\
+\hline
+GES & $\mathbf{0 . 8 0} \pm 1.60$ & $\mathbf{0 . 8 0} \pm 1.60$ & $\mathbf{0 . 2 0} \pm 0.40$ & $\mathbf{2 . 2 0} \pm 4.40$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{0 . 8 0} \pm 0.40$ \\
+\hline
+PC +t -Propagation & $4.00 \pm 0.00$ & $4.00 \pm 0.00$ & $4.60 \pm 1.20$ & $14.60 \pm 1.20$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ \\
+\hline
+GES +t -Propagation & $\mathbf{0 . 8 0} \pm 1.60$ & $\mathbf{0 . 8 0} \pm 1.60$ & $\mathbf{0 . 2 0} \pm 0.40$ & $\mathbf{2 . 2 0} \pm 4.40$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{0 . 8 0} \pm 0.40$ \\
+\hline
+Typed-PC (Naive) & $2.00 \pm 0.45$ & $3.90 \pm 0.70$ & $9.60 \pm 1.56$ & $9.60 \pm 1.56$ & $0.51 \pm 0.09$ & $0.50 \pm 0.11$ & $0.50 \pm 0.10$ \\
+\hline
+Typed-PC (Maj.) & $2.00 \pm 0.45$ & $3.90 \pm 0.70$ & $9.60 \pm 1.56$ & $9.60 \pm 1.56$ & $0.51 \pm 0.09$ & $0.50 \pm 0.11$ & $0.50 \pm 0.10$ \\
+\hline
+Tagged-PC (AntiV) & $1.80 \pm 0.75$ & $3.50 \pm 1.36$ & $8.60 \pm 3.26$ & $8.60 \pm 3.26$ & $0.56 \pm 0.17$ & $0.55 \pm 0.19$ & $0.55 \pm 0.18$ \\
+\hline
+Tagged-PC & $2.00 \pm 0.45$ & $3.90 \pm 0.70$ & $9.60 \pm 1.56$ & $9.60 \pm 1.56$ & $0.51 \pm 0.09$ & $0.50 \pm 0.11$ & $0.50 \pm 0.10$ \\
+\hline
+Tagged-GES & $\mathbf{0 . 8 0} \pm 1.60$ & $\mathbf{0 . 8 0} \pm 1.60$ & $\mathbf{0 . 2 0} \pm 0.40$ & $\mathbf{2 . 2 0}_{ \pm 4.40}$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{0 . 8 0} \pm 0.40$ \\
+\hline
+Dataset Earthquake & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $0.60 \pm 1.50$ & $0.80 \pm 1.83$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $1.40 \pm 4.20$ & $0.90 \pm 0.30$ & $0.90 \pm 0.30$ & $0.90 \pm 0.30$ \\
+\hline
+GES & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+PC +t -Propagation & $2.40 \pm 0.92$ & $4.40 \pm 1.20$ & $9.00 \pm 3.00$ & $10.80 \pm 2.75$ & $0.50 \pm 0.22$ & $0.45 \pm 0.15$ & $0.47 \pm 0.16$ \\
+\hline
+GES +t -Propagation & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Typed-PC (Naive) & $0.40 \pm 0.92$ & $0.60 \pm 1.28$ & $\mathbf{0 . 0 0} \pm 0.00$ & $0.90 \pm 2.70$ & $\mathbf{1 . 0 0} \pm 0.00$ & $0.95 \pm 0.15$ & $0.97 \pm 0.10$ \\
+\hline
+Typed-PC (Maj.) & $0.40 \pm 0.92$ & $0.60 \pm 1.28$ & $\mathbf{0 . 0 0} \pm 0.00$ & $0.90 \pm 2.70$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.95 \pm 0.15$ & $0.97 \pm 0.10$ \\
+\hline
+Tagged-PC (AntiV) & $2.20 \pm 0.40$ & $4.40 \pm 0.80$ & $9.90 \pm 0.30$ & $9.90 \pm 0.30$ & $0.50 \pm 0.00$ & $0.50 \pm 0.00$ & $0.50 \pm 0.00$ \\
+\hline
+Tagged-PC & $0.60 \pm 1.50$ & $0.80 \pm 1.83$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $1.40 \pm 4.20$ & $0.90 \pm 0.30$ & $0.90 \pm 0.30$ & $0.90 \pm 0.30$ \\
+\hline
+Tagged-GES & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Dataset Survey & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $2.30 \pm 0.64$ & $4.30 \pm 0.64$ & $11.10 \pm 1.92$ & $11.80 \pm 2.44$ & $0.64 \pm 0.05$ & $0.62 \pm 0.11$ & $0.63 \pm 0.08$ \\
+\hline
+GES & $4.20 \pm 1.89$ & $4.30 \pm 1.79$ & $\mathbf{8 . 5 0}_{ \pm 2.06}$ & $15.80 \pm 7.52$ & $0.48 \pm 0.48$ & $0.30 \pm 0.31$ & $0.36 \pm 0.37$ \\
+\hline
+PC +t -Propagation & $6.00 \pm 0.00$ & $7.80 \pm 0.60$ & $10.90 \pm 3.30$ & $29.50 \pm 1.50$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ \\
+\hline
+GES +t -Propagation & $4.20 \pm 1.89$ & $4.30 \pm 1.79$ & $\mathbf{8 . 5 0} \pm 2.06$ & $15.80 \pm 7.52$ & $0.48 \pm 0.48$ & $0.30 \pm 0.31$ & $0.36 \pm 0.37$ \\
+\hline
+Typed-PC (Naive) & $2.40 \pm 0.66$ & $4.40 \pm 0.66$ & $11.50 \pm 1.86$ & $12.30 \pm 2.33$ & $0.64 \pm 0.05$ & $0.60 \pm 0.11$ & $0.62 \pm 0.09$ \\
+\hline
+Typed-PC (Maj.) & $\mathbf{2 . 1 0} \pm 0.30$ & $\mathbf{4 . 1 0} \pm 0.30$ & $13.10 \pm 0.30$ & $13.10 \pm 0.30$ & $\mathbf{0 . 6 6} \pm 0.02$ & $\mathbf{0 . 6 5} \pm 0.05$ & $\mathbf{0 . 6 5} \pm 0.04$ \\
+\hline
+Tagged-PC (AntiV) & $2.20 \pm 0.60$ & $4.30 \pm 0.90$ & $11.70 \pm 2.10$ & $11.70 \pm 2.10$ & $0.64 \pm 0.08$ & $0.63 \pm 0.10$ & $0.64 \pm 0.09$ \\
+\hline
+Tagged-PC & $2.20 \pm 0.40$ & $4.20 \pm 0.40$ & $11.10 \pm 1.92$ & $\mathbf{1 1 . 2 0}_{ \pm 2.04}$ & $0.65 \pm 0.03$ & $0.63 \pm 0.07$ & $0.64 \pm 0.05$ \\
+\hline
+Tagged-GES & $4.20 \pm 1.89$ & $4.30 \pm 1.79$ & $\mathbf{8 . 5 0}_{ \pm 2.06}$ & $15.80 \pm 7.52$ & $0.48 \pm 0.48$ & $0.30 \pm 0.31$ & $0.36 \pm 0.37$ \\
+\hline
+Dataset Asia & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $6.10 \pm 0.30$ & $6.40 \pm 0.80$ & $14.40 \pm 3.90$ & $28.00 \pm 2.68$ & $0.95 \pm 0.15$ & $0.25 \pm 0.00$ & $0.39 \pm 0.02$ \\
+\hline
+GES & $3.00 \pm 0.00$ & $3.00 \pm 0.00$ & $\mathbf{0 . 8 0} \pm 0.40$ & $8.80 \pm 1.60$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.62 \pm 0.00$ & $0.77 \pm 0.00$ \\
+\hline
+PC +t -Propagation & $4.10 \pm 0.30$ & $5.80 \pm 0.40$ & $24.60 \pm 2.20$ & $24.60 \pm 2.20$ & $0.69 \pm 0.05$ & $0.50 \pm 0.00$ & $0.58 \pm 0.02$ \\
+\hline
+GES +t -Propagation & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 8 0} \pm 0.40$ & $\mathbf{1 . 8 0} \pm 1.60$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 8 8} \pm 0.00$ & $\mathbf{0 . 9 3} \pm 0.00$ \\
+\hline
+Typed-PC (Naive) & $3.40 \pm 0.92$ & $3.80 \pm 1.54$ & $15.20 \pm 4.33$ & $19.30 \pm 5.33$ & $0.93 \pm 0.15$ & $0.59 \pm 0.11$ & $0.72 \pm 0.13$ \\
+\hline
+Typed-PC (Maj.) & $3.50 \pm 1.20$ & $4.20 \pm 2.04$ & $17.60 \pm 6.51$ & $21.00 \pm 8.38$ & $0.88 \pm 0.22$ & $0.57 \pm 0.15$ & $0.69 \pm 0.18$ \\
+\hline
+Tagged-PC (AntiV) & $4.00 \pm 1.41$ & $5.20 \pm 2.32$ & $22.40 \pm 6.79$ & $24.00 \pm 7.42$ & $0.74 \pm 0.23$ & $0.51 \pm 0.17$ & $0.61 \pm 0.20$ \\
+\hline
+Tagged-PC & $6.10 \pm 0.30$ & $6.40 \pm 0.80$ & $14.40 \pm 3.90$ & $28.00 \pm 2.68$ & $0.95 \pm 0.15$ & $0.25 \pm 0.00$ & $0.39 \pm 0.02$ \\
+\hline
+Tagged-GES & $3.00 \pm 0.00$ & $3.00 \pm 0.00$ & $\mathbf{0 . 8 0} \pm 0.40$ & $8.80 \pm 1.60$ & $\mathbf{1 . 0 0} \pm 0.00$ & $0.62 \pm 0.00$ & $0.77 \pm 0.00$ \\
+\hline
+Dataset Lucas & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 9 2} \pm 0.00$ & $0.96 \pm 0.00$ \\
+\hline
+GES & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+PC +t -Propagation & $12.00 \pm 0.00$ & $12.00 \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $99.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ & $0.00 \pm 0.00$ \\
+\hline
+GES +t -Propagation & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Typed-PC (Naive) & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Typed-PC (Maj.) & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Tagged-PC (AntiV) & $5.00 \pm 0.00$ & $10.00 \pm 0.00$ & $39.00 \pm 0.00$ & $39.00 \pm 0.00$ & $0.58 \pm 0.00$ & $0.58 \pm 0.00$ & $0.58 \pm 0.00$ \\
+\hline
+Tagged-PC & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Tagged-GES & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+\end{tabular}
+\end{center}
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|}
+\hline
+Evaluation Results & SHD & $\mathrm{SHD}_{\text {double }}$ & $\mathrm{SID}_{\text {min }}$ & $\mathrm{SID}_{\text {max }}$ & Precision & Recall & $\mathrm{F}_{1}$ \\
+\hline
+Dataset Child & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $5.20 \pm 1.40$ & $8.60 \pm 2.24$ & $76.00 \pm 22.26$ & $100.80 \pm 26.43$ & $0.85 \pm 0.04$ & $0.80 \pm 0.06$ & $0.82 \pm 0.05$ \\
+\hline
+GES & $12.00 \pm 0.00$ & $12.00 \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $228.00 \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.52 \pm 0.00$ & $0.68 \pm 0.00$ \\
+\hline
+PC +t -Propagation & $11.90 \pm 1.76$ & $22.10 \pm 3.14$ & $164.90 \pm 26.12$ & $196.90 \pm 27.43$ & $0.56 \pm 0.07$ & $0.53 \pm 0.07$ & $0.54 \pm 0.07$ \\
+\hline
+GES +t -Propagation & $10.00 \pm 0.00$ & $10.00 \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $188.00 \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.60 \pm 0.00$ & $0.75 \pm 0.00$ \\
+\hline
+Typed-PC (Naive) & $6.00 \pm 2.79$ & $11.00 \pm 4.86$ & $94.60 \pm 37.65$ & $112.60 \pm 47.49$ & $0.79 \pm 0.10$ & $0.76 \pm 0.10$ & $0.78 \pm 0.10$ \\
+\hline
+Typed-PC (Maj.) & $4.20 \pm 1.08$ & $7.70 \pm 2.10$ & $68.40 \pm 15.25$ & $80.40 \pm 14.93$ & $0.85 \pm 0.04$ & $0.84 \pm 0.05$ & $0.84 \pm 0.04$ \\
+\hline
+Tagged-PC (AntiV) & $11.80 \pm 1.08$ & $23.50 \pm 1.96$ & $224.90 \pm 16.27$ & $224.90 \pm 16.27$ & $0.53 \pm 0.04$ & $0.53 \pm 0.04$ & $0.53 \pm 0.04$ \\
+\hline
+Tagged-PC & $3.10 \pm 1.14$ & $6.10 \pm 2.30$ & $63.80 \pm 25.79$ & $63.80 \pm 25.79$ & $0.88 \pm 0.05$ & $0.88 \pm 0.05$ & $0.88 \pm 0.05$ \\
+\hline
+Tagged-GES & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{2 . 0 0}_{ \pm 0.00}$ & $20.00 \pm 0.00$ & $\mathbf{2 0 . 0 0}_{ \pm 0.00}$ & $0.96 \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Dataset Alarm & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $11.50 \pm 3.96$ & $13.40 \pm 5.71$ & $58.80 \pm 39.62$ & $125.90 \pm 68.80$ & $0.93 \pm 0.07$ & $0.79 \pm 0.07$ & $0.85 \pm 0.07$ \\
+\hline
+GES & $8.80 \pm 2.18$ & $9.90 \pm 2.70$ & $47.40 \pm 9.87$ & $96.20 \pm 12.66$ & $\mathbf{0 . 9 4} \pm 0.03$ & $0.84 \pm 0.03$ & $0.89 \pm 0.03$ \\
+\hline
+PC +t -Propagation & $21.20 \pm 2.36$ & $37.90 \pm 4.01$ & $395.10 \pm 43.74$ & $395.10 \pm 43.74$ & $0.60 \pm 0.05$ & $0.58 \pm 0.04$ & $0.59 \pm 0.04$ \\
+\hline
+GES +t -Propagation & $8.00 \pm 2.37$ & $9.30 \pm 3.10$ & $49.60 \pm 11.61$ & $87.40 \pm 14.70$ & $0.94 \pm 0.04$ & $0.85 \pm 0.03$ & $0.89 \pm 0.04$ \\
+\hline
+Typed-PC (Naive) & $17.90 \pm 6.52$ & $27.20 \pm 11.30$ & $224.00 \pm 96.85$ & $285.00 \pm 112.02$ & $0.75 \pm 0.14$ & $0.65 \pm 0.14$ & $0.69 \pm 0.14$ \\
+\hline
+Typed-PC (Maj.) & $13.30 \pm 1.19$ & $19.10 \pm 1.64$ & $140.40 \pm 12.80$ & $188.00 \pm 9.44$ & $0.84 \pm 0.02$ & $0.75 \pm 0.02$ & $0.79 \pm 0.01$ \\
+\hline
+Tagged-PC (AntiV) & $20.30 \pm 1.85$ & $35.20 \pm 2.86$ & $333.60 \pm 27.96$ & $353.50 \pm 29.90$ & $0.64 \pm 0.04$ & $0.60 \pm 0.03$ & $0.62 \pm 0.03$ \\
+\hline
+Tagged-PC & $8.80 \pm 2.68$ & $12.70 \pm 4.65$ & $87.10 \pm 39.71$ & $92.20 \pm 40.70$ & $0.89 \pm 0.05$ & $0.85 \pm 0.05$ & $0.87 \pm 0.05$ \\
+\hline
+Tagged-GES & $\mathbf{5 . 7 0}_{ \pm 1.68}$ & $\mathbf{7 . 9 0}_{ \pm 2.07}$ & $\mathbf{4 7 . 2 0}_{ \pm 6.40}$ & $\mathbf{4 7 . 2 0}_{ \pm 6.40}$ & $0.92 \pm 0.03$ & $\mathbf{0 . 9 0} \pm 0.02$ & $\mathbf{0 . 9 1} \pm 0.02$ \\
+\hline
+Dataset Insurance & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $22.00_{ \pm 2.61}$ & $30.20 \pm 4.14$ & $371.30 \pm 37.41$ & $393.30 \pm 50.29$ & $0.78 \pm 0.04$ & $0.59 \pm 0.05$ & $0.67 \pm 0.05$ \\
+\hline
+GES & $24.50 \pm 2.73$ & $28.10 \pm 5.63$ & $230.70 \pm 61.36$ & $341.70 \pm 23.83$ & $0.85 \pm 0.11$ & $0.57 \pm 0.03$ & $0.68 \pm 0.06$ \\
+\hline
+PC +t -Propagation & $24.50 \pm 2.46$ & $37.70 \pm 4.43$ & $455.70 \pm 31.47$ & $458.60 \pm 31.33$ & $0.67 \pm 0.05$ & $0.54 \pm 0.04$ & $0.60 \pm 0.05$ \\
+\hline
+GES +t -Propagation & $19.90 \pm 4.66$ & $\mathbf{2 4 . 5 0}_{ \pm 7.58}$ & $257.70 \pm 61.36$ & $\mathbf{3 0 3 . 9 0}_{ \pm 38.44}$ & $0.84 \pm 0.10$ & $\mathbf{0 . 6 6} \pm 0.07$ & $\mathbf{0 . 7 4} \pm 0.08$ \\
+\hline
+Typed-PC (Naive) & $\mathbf{1 9 . 3 0} \pm 3.20$ & $26.20 \pm 7.18$ & $337.20 \pm 72.77$ & $367.80 \pm 50.36$ & $0.82 \pm 0.10$ & $0.64 \pm 0.06$ & $0.72 \pm 0.07$ \\
+\hline
+Typed-PC (Maj.) & $20.10 \pm 2.77$ & $27.80 \pm 5.44$ & $348.10 \pm 62.71$ & $378.70 \pm 51.11$ & $0.80 \pm 0.07$ & $0.62 \pm 0.05$ & $0.70 \pm 0.06$ \\
+\hline
+Tagged-PC (AntiV) & $39.70 \pm 1.68$ & $66.30 \pm 3.29$ & $618.20 \pm 22.81$ & $619.70 \pm 23.27$ & $0.32 \pm 0.04$ & $0.25 \pm 0.04$ & $0.28 \pm 0.04$ \\
+\hline
+Tagged-PC & $21.80 \pm 2.93$ & $30.40 \pm 4.76$ & $374.20 \pm 46.92$ & $391.00 \pm 51.20$ & $0.77 \pm 0.06$ & $0.59 \pm 0.05$ & $0.67 \pm 0.05$ \\
+\hline
+Tagged-GES & $21.10 \pm 4.06$ & $\mathbf{2 4 . 5 0}_{ \pm 6.84}$ & $\mathbf{2 2 5 . 9 0}_{ \pm 59.47}$ & $323.50 \pm 37.45$ & $\mathbf{0 . 8 6} \pm 0.10$ & $0.63 \pm 0.06$ & $0.73 \pm 0.07$ \\
+\hline
+Dataset Hailfinder & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $46.00 \pm 2.83$ & $49.40 \pm 4.18$ & - & - & $\mathbf{0 . 8 3}_{ \pm 0.06}$ & $0.39 \pm 0.04$ & $0.53 \pm 0.04$ \\
+\hline
+GES & $\mathbf{3 9 . 0 0}_{ \pm 15.21}$ & $\mathbf{4 2 . 2 0}_{ \pm 15.28}$ & - & - & $0.69 \pm 0.12$ & $\mathbf{0 . 6 5} \pm 0.12$ & $\mathbf{0 . 6 7} \pm 0.12$ \\
+\hline
+PC +t -Propagation & $61.90 \pm 2.59$ & $84.20 \pm 4.47$ & - & - & $0.32 \pm 0.05$ & $0.15 \pm 0.03$ & $0.20 \pm 0.03$ \\
+\hline
+GES +t -Propagation & $\mathbf{3 9 . 0 0}_{ \pm 15.21}$ & $\mathbf{4 2 . 2 0}_{ \pm 15.28}$ & - & - & $0.69 \pm 0.12$ & $\mathbf{0 . 6 5} \pm 0.12$ & $\mathbf{0 . 6 7} \pm 0.12$ \\
+\hline
+Typed-PC (Naive) & $48.80 \pm 2.68$ & $55.60 \pm 3.67$ & - & - & $0.72 \pm 0.06$ & $0.35 \pm 0.02$ & $0.47 \pm 0.03$ \\
+\hline
+Typed-PC (Maj.) & $48.50 \pm 2.25$ & $55.20 \pm 2.64$ & - & - & $0.73 \pm 0.06$ & $0.35 \pm 0.01$ & $0.48 \pm 0.02$ \\
+\hline
+Tagged-PC (AntiV) & $57.10 \pm 1.87$ & $73.20 \pm 2.52$ & - & - & $0.44 \pm 0.07$ & $0.22 \pm 0.02$ & $0.30 \pm 0.03$ \\
+\hline
+Tagged-PC & $44.60 \pm 2.42$ & $49.90 \pm 3.73$ & - & - & $0.78 \pm 0.05$ & $0.41 \pm 0.02$ & $0.54 \pm 0.03$ \\
+\hline
+Tagged-GES & $\mathbf{3 9 . 0 0}_{ \pm 15.21}$ & $\mathbf{4 2 . 2 0}_{ \pm 15.28}$ & - & - & $0.69 \pm 0.12$ & $\mathbf{0 . 6 5} \pm 0.12$ & $\mathbf{0 . 6 7} \pm 0.12$ \\
+\hline
+Dataset Hepar2 & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $94.80 \pm 4.85$ & $126.60 \pm 9.84$ & - & - & $0.50 \pm 0.07$ & $0.28 \pm 0.04$ & $0.35 \pm 0.05$ \\
+\hline
+GES & $57.60 \pm 3.23$ & $64.90 \pm 3.36$ & - & - & $0.90 \pm 0.01$ & $0.53 \pm 0.03$ & $0.67 \pm 0.02$ \\
+\hline
+PC +t -Propagation & $86.90 \pm 2.43$ & $113.30 \pm 4.29$ & - & - & $0.57 \pm 0.02$ & $0.34 \pm 0.01$ & $0.43 \pm 0.02$ \\
+\hline
+GES +t -Propagation & $53.80 \pm 2.18$ & $61.40 \pm 3.26$ & - & - & $0.90 \pm 0.02$ & $0.56 \pm 0.02$ & $0.69 \pm 0.02$ \\
+\hline
+Typed-PC (Naive) & $88.50 \pm 9.78$ & $115.20 \pm 20.43$ & - & - & $0.57 \pm 0.13$ & $0.33 \pm 0.07$ & $0.41 \pm 0.09$ \\
+\hline
+Typed-PC (Maj.) & $76.50 \pm 3.04$ & $92.00 \pm 5.57$ & - & - & $0.73 \pm 0.03$ & $0.43 \pm 0.03$ & $0.54 \pm 0.03$ \\
+\hline
+Tagged-PC (AntiV) & $87.80 \pm 3.34$ & $112.60 \pm 5.41$ & - & - & $0.58 \pm 0.04$ & $0.33 \pm 0.03$ & $0.42 \pm 0.03$ \\
+\hline
+Tagged-PC & $92.50 \pm 6.79$ & $124.00 \pm 12.98$ & - & - & $0.50 \pm 0.08$ & $0.30 \pm 0.05$ & $0.37 \pm 0.06$ \\
+\hline
+Tagged-GES & $\mathbf{5 3 . 6 0}_{ \pm 1.80}$ & $\mathbf{6 0 . 0 0}_{ \pm 2.14}$ & - & - & $\mathbf{0 . 9 1} \pm 0.01$ & $\mathbf{0 . 5 7} \pm 0.01$ & $\mathbf{0 . 7 0} \pm 0.01$ \\
+\hline
+Dataset Win95Pts & \multicolumn{7}{|c|}{} \\
+\hline
+PC & $58.80 \pm 4.17$ & $66.10 \pm 6.28$ & - & - & $\mathbf{0 . 8 5} \pm 0.05$ & $0.52 \pm 0.03$ & $0.65 \pm 0.04$ \\
+\hline
+GES & $52.20 \pm 6.43$ & $57.90 \pm 6.82$ & - & - & $0.76 \pm 0.03$ & $0.71 \pm 0.03$ & $0.73 \pm 0.03$ \\
+\hline
+PC +t -Propagation & $89.50 \pm 4.13$ & $128.60 \pm 6.56$ & - & - & $0.39 \pm 0.05$ & $0.25 \pm 0.03$ & $0.30 \pm 0.04$ \\
+\hline
+GES +t -Propagation & $52.00 \pm 6.78$ & $58.00 \pm 6.93$ & - & - & $0.76 \pm 0.03$ & $0.71 \pm 0.03$ & $0.73 \pm 0.03$ \\
+\hline
+Typed-PC (Naive) & $62.40 \pm 3.58$ & $72.90 \pm 5.24$ & - & - & $0.80 \pm 0.03$ & $0.49 \pm 0.03$ & $0.61 \pm 0.03$ \\
+\hline
+Typed-PC (Maj.) & $60.70 \pm 2.90$ & $69.70 \pm 4.75$ & - & - & $0.83 \pm 0.03$ & $0.51 \pm 0.03$ & $0.63 \pm 0.03$ \\
+\hline
+Tagged-PC (AntiV) & $69.50 \pm 3.75$ & $96.20 \pm 4.85$ & - & - & $0.60 \pm 0.03$ & $0.43 \pm 0.03$ & $0.50 \pm 0.03$ \\
+\hline
+Tagged-PC & $52.10 \pm 3.81$ & $62.80 \pm 6.62$ & - & - & $0.81 \pm 0.04$ & $0.58 \pm 0.03$ & $0.68 \pm 0.04$ \\
+\hline
+Tagged-GES & $\mathbf{4 6 . 1 0} \pm 5.94$ & $\mathbf{5 2 . 9 0}_{ \pm 6.39}$ & - & - & $0.77 \pm 0.03$ & $\mathbf{0 . 7 6} \pm 0.03$ & $\mathbf{0 . 7 6} \pm 0.03$ \\
+\hline
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 4: Absolute Scores of Best Configuration per Dataset. For each method, the parameter configuration (including LLM) that performed best for itself was chosen. Split across two pages due to the large table size. Certain SID results were omitted due to the high computation time. $\pm y$ indicates std. deviation.}
+\end{center}
+\end{table}
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{l|ccccccc}
+ & \begin{tabular}{c}
+SHD \\
+Ranks \\
+\end{tabular} & \begin{tabular}{c}
+SHD $_{\text {double }}$ \\
+Ranks \\
+\end{tabular} & \begin{tabular}{c}
+SID $_{\text {min }}$ \\
+Ranks \\
+\end{tabular} & \begin{tabular}{c}
+SID $_{\text {max }}$ \\
+Ranks \\
+\end{tabular} & \begin{tabular}{c}
+Precision \\
+Ranks \\
+\end{tabular} & \begin{tabular}{c}
+Recall \\
+Ranks \\
+\end{tabular} & \begin{tabular}{c}
+$\mathrm{F}_{1}$ \\
+Ranks \\
+\end{tabular} \\
+\hline
+GT CPDAG & $1.64 \pm 0.00$ & $1.64 \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $1.62 \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $1.64 \pm 0.00$ & $1.64 \pm 0.00$ \\
+Tagging on GT CPDAG & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $1.12 \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $1.27 \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ \\
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 5: Average Ranks for Ground Truth CPDAG over all Datasets (lower is better). We use the parameters that performed best in the main evaluation as shown in Table 1. SID ${ }_{\text {min }}$ and Precision are highest on the GT CPDAG, as there are no errors in the graph. However, the other metrics show that our approach, on average, improves the graph by directing more edges correctly than incorrectly. $\pm_{y}$ indicates std. deviation.}
+\end{center}
+\end{table}
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|}
+\hline
+Evaluation Results & SHD & $\mathrm{SHD}_{\text {double }}$ & $\mathrm{SID}_{\text {min }}$ & $\mathrm{SID}_{\text {max }}$ & Precision & Recall & $\mathrm{F}_{1}$ \\
+\hline
+Dataset Cancer &  &  &  &  &  &  &  \\
+\hline
+GT CPDAG & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{1 . 0 0} \pm 0.00$ \\
+\hline
+Dataset Earthquake & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Dataset Survey & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ \\
+\hline
+Dataset Asia & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $\mathbf{3 . 0 0}_{ \pm 0.00}$ & $\mathbf{3 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 2 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 6 2}_{ \pm 0.00}$ & $\mathbf{0 . 7 7} \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{3 . 0 0}_{ \pm 0.00}$ & $\mathbf{3 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0} \pm 0.00$ & $\mathbf{1 2 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 6 2} \pm 0.00$ & $\mathbf{0 . 7 7} \pm 0.00$ \\
+\hline
+Dataset Lucas & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0} \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 9 2} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Dataset Child & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $10.00 \pm 0.00$ & $10.00 \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $209.00 \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.60 \pm 0.00$ & $0.75 \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{2 . 0 0}_{ \pm 0.00}$ & $20.00 \pm 0.00$ & $\mathbf{2 0 . 0 0}_{ \pm 0.00}$ & $0.96 \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Dataset Alarm & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $4.00 \pm 0.00$ & $\mathbf{4 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $46.00 \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.91 \pm 0.00$ & $0.95 \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{2 . 0 0}_{ \pm 0.00}$ & $\mathbf{4 . 0 0}_{ \pm 0.00}$ & $26.00 \pm 0.00$ & $\mathbf{2 6 . 0 0}_{ \pm 0.00}$ & $0.96 \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Dataset Insurance & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $2.00 \pm 0.00$ & $2.00 \pm 0.00$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $75.00 \pm 0.00$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.96 \pm 0.00$ & $0.98 \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 0 0}_{ \pm 0.00}$ & $\mathbf{4 9 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.98 \pm 0.00$ & $\mathbf{0 . 9 9} \pm 0.00$ \\
+\hline
+Dataset Hailfinder & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $17.00 \pm 0.00$ & $17.00 \pm 0.00$ & - & - & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.74 \pm 0.00$ & $0.85 \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{6 . 0 0}_{ \pm 0.00}$ & $\mathbf{1 2 . 0 0}_{ \pm 0.00}$ & - & - & $0.91 \pm 0.00$ & $\mathbf{0 . 9 1} \pm 0.00$ & $\mathbf{0 . 9 1} \pm 0.00$ \\
+\hline
+Dataset Hepar2 & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $7.00 \pm 0.00$ & $\mathbf{7 . 0 0}_{ \pm 0.00}$ & - & - & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $0.94 \pm 0.00$ & $\mathbf{0 . 9 7} \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $\mathbf{6 . 0 0}_{ \pm 0.00}$ & $8.00 \pm 0.00$ & - & - & $0.98 \pm 0.00$ & $\mathbf{0 . 9 5} \pm 0.00$ & $0.97 \pm 0.00$ \\
+\hline
+Dataset Win95Pts & \multicolumn{7}{|c|}{} \\
+\hline
+GT CPDAG & $\mathbf{8 . 0 0}_{ \pm 0.00}$ & $\mathbf{8 . 0 0}_{ \pm 0.00}$ & - & - & $\mathbf{1 . 0 0}_{ \pm 0.00}$ & $\mathbf{0 . 9 3}_{ \pm 0.00}$ & $\mathbf{0 . 9 6} \pm 0.00$ \\
+\hline
+Tagging on GT CPDAG & $9.00 \pm 0.00$ & $18.00 \pm 0.00$ & - & - & $0.92 \pm 0.00$ & $0.92 \pm 0.00$ & $0.92 \pm 0.00$ \\
+\hline
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 6: Absolute Scores for Ground Truth CPDAG over all Datasets. Certain SID results were omitted due to the high computation time. We use the parameters that performed best in the main evaluation as shown in Table 1. Direction using tagging improves results on several datasets. $\pm y$ indicates std. deviation.}
+\end{center}
+\end{table}
+
+\section*{E. 5 Directing Based on Noisy Tags}
+In this experiment, the setup is similar to the previous experiment on undirecting directed edges (Sec. E.4). We consider the ground truth causal graph and, considering every edge once, undirect this single edge and record whether it again gets directed correctly, incorrectly, or remains undirected. Edges that would be directed using Meek rules are excluded from this evaluation, as we only want to investigate the effects of tagging. We differ from the previous experiment by adding $N \%$ tag faults with $N=[0,10,20,30,40,50]$ (with $100 \%$ representing the current number of tags). To be precise, we add $\frac{N}{2} \%$ random tags to variables that do not already have this tag and remove $\frac{X}{2} \%$ tags that were originally assigned by the LLM. We average across 10 seeds and record the accuracy of correct predictions (ignoring edges that are not directed). The results are shown in Figure 6.
+
+Note that the number of undirected edges that are not directed using Meek's rule is quite small, so it is unsurprising if some accuracies match 0 or 1 . We can see that even if a large number of faults are
+
+\begin{table}[h]
+\begin{center}
+\begin{tabular}{|l|l|l|l|l|l|l|l|l|l|l|l|l|}
+\hline
+\multicolumn{2}{|c|}{} & Ca & Ea & Su & As & Lu & Ch & In & Al & Ha & He & Wi \\
+\hline
+\multirow{6}{*}{\includegraphics[max width=\textwidth, alt={}]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-23_98_25_302_392}
+} & 1 & 0/0/0 & 0/0/0 & 0/0/0 & 2/0/1 & 1/0/0 & 0/1/1 & 1/2/0 & 2/0/2 & 0/0/1 & 4 / 0/5 & 2/1/6 \\
+\hline
+ & 2 & 0 / 1 / 1 & 1 / 1 / 0 & 1 / 1 / 0 & 3 / 1 / 2 & 0 / 1 / 1 & 6 / 7 / 1 & 8 / 8 / 2 & 9 / 3 / 6 & 11 / 2 / 25 & 35 / 3 / 40 & 20 / 10 / 58 \\
+\hline
+ & 3 & 0 / 1 / 5 & 4/2/0 & 3/3/0 & 1/1/1 & 2/2/2 & 41/25/9 & 40 / 24 / 20 & 29/16/12 & 72 / 22 / 77 & 6 / 1 / 8 & 6 / 3 / 24 \\
+\hline
+ & 4 & 0/0/0 & 0/0/0 & 0/0/4 & 2/2/0 & 3/4/1 & 140 / 59 / 37 & 10 / 4 / 2 & 12 / 6 / 2 & 37/8/23 & 0/0/0 & 1 / 1 / 2 \\
+\hline
+ & 5 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 3/2/5 & 2/6/2 & 143 / 47 / 35 & 0/0/0 & 4/4/2 & 12 / 4 / 4 & 0/0/0 & 0/0/0 \\
+\hline
+ & 6 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 0/0/6 & 3/7/2 & 54 / 18 / 24 & 0/0/0 & 0/0/0 & 0/0/6 & 0/0/0 & 0/0/0 \\
+\hline
+\multirow{6}{*}{No} & 1 & 0/0/0 & 0/0/0 & 0/0/0 & 2/0/1 & 1/0/0 & 1/0/1 & 2/0/1 & 1/1/2 & 1/0/0 & 4/1/4 & 2/1/6 \\
+\hline
+ & 2 & 0 / 0/2 & 1/1/0 & 1/1/0 & 3/1/2 & 1/1/0 & 6/0/8 & 10 / 2 / 6 & 5 / 6 / 7 & 35/3/0 & 35 / 11/32 & 18 / 15 / 55 \\
+\hline
+ & 3 & 2 / 0 / 4 & 4 / 2 / 0 & $3 / 1 / 2$ & 1 / 1 / 1 & 2/4/0 & 41 / 0/34 & 49 / 16 / 19 & 20 / 22 / 15 & 168 / 3 / 0 & 7/1/7 & 8 / 8 / 17 \\
+\hline
+ & 4 & $0 / 0 / 0$ & 0/0/0 & 0/0/4 & 2/2/0 & 2/6/0 & 142 / 0/ 94 & 9/0/7 & 11/7/2 & 66 / 2 / 0 & 0/0/0 & 2/1/1 \\
+\hline
+ & 5 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 5/5/0 & 2/7/1 & 147 / 3 / 75 & 0/0/0 & 4 / 5 / 1 & 19/1/0 & 0/0/0 & 0/0/0 \\
+\hline
+ & 6 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 0/0/6 & 4/8/0 & 58 / 3 / 35 & 0/0/0 & 0/0/0 & 5/1/0 & 0/0/0 & 0/0/0 \\
+\hline
+\multirow{6}{*}{$\frac{1}{0}$} & 1 & 0/0/0 & 0/0/0 & 0/0/0 & 2/0/1 & 1/0/0 & 1/0/1 & 0/2/1 & 1/0/3 & 0/0/1 & 3/1/5 & 0/0/9 \\
+\hline
+ & 2 & 0/1/1 & 1/1/0 & 0/2/0 & 4/0/2 & 0/1/1 & 3/6/5 & 5/6/7 & 4 / 1 / 13 & 10 / 4 / 24 & 26 / 11/ 41 & 0/0/88 \\
+\hline
+ & 3 & 0 / 1 / 5 & 4/2/0 & 2/4/0 & 2/0/1 & 2/2/2 & 25 / 32 / 18 & 38/21/25 & 8/6/43 & 65 / 40 / 66 & 6 / 1 / 8 & 0/0/33 \\
+\hline
+ & 4 & 0/0/0 & 0/0/0 & 0/0/4 & 2/2/0 & 3/4/1 & 104 / 92 / 40 & 11 / 3 / 2 & 2/3/15 & 39 / 10/ 19 & 0/0/0 & 0/0/4 \\
+\hline
+ & 5 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 3/2/5 & 2/3/5 & 122 / 87 / 16 & 0/0/0 & 1/3/6 & 11 / 6 / 3 & 0/0/0 & 0/0/0 \\
+\hline
+ & 6 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 0/0/6 & 3/7/2 & 56 / 31 / 9 & 0/0/0 & 0/0/0 & 0/0/6 & 0/0/0 & 0/0/0 \\
+\hline
+\multirow{6}{*}{GPT-4o} & 1 & 0/0/0 & 0/0/0 & 0/0/0 & 2/0/1 & 0/1/0 & 1/1/0 & 2/0/1 & 1/1/2 & 0/0/1 & 2/0/7 & 0/0/9 \\
+\hline
+ & 2 & 0/0/2 & 1/1/0 & 0/2/0 & 2/0/4 & 1/1/0 & 6/7/1 & 9/0/9 & 6/6/6 & 9 / 2 / 27 & 18 / 3 / 57 & 0/0/88 \\
+\hline
+ & 3 & 0/6/0 & 4/2/0 & 0/2/4 & 0/0/3 & 3/2/1 & 41/25/9 & 39 / 3 / 42 & 21 / 23 / 13 & 61 / 22 / 88 & 4 / 1 / 10 & 0/0/33 \\
+\hline
+ & 4 & 0/0/0 & 0/0/0 & 0/0/4 & 2/2/0 & 3/4/1 & 140 / 59 / 37 & 9/0/7 & 9/8/3 & 34 / 8 / 26 & 0/0/0 & 0/0/4 \\
+\hline
+ & 5 & 0/0/0 & 0/0/0 & 0/0/0 & 3/2/5 & 2/6/2 & 143 / 47 / 35 & 0/0/0 & 3/6/1 & 10 / 4 / 6 & 0/0/0 & 0/0/0 \\
+\hline
+ & 6 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 0/0/6 & 3/7/2 & 52 / 18 / 26 & 0/0/0 & 0/0/0 & 0/0/6 & 0/0/0 & 0/0/0 \\
+\hline
+\multirow{6}{*}{\includegraphics[max width=\textwidth, alt={}]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-23_96_27_902_390}
+} & 1 & 0/0/0 & 0/0/0 & 0/0/0 & 2/0/1 & 0/0/1 & 1/1/0 & 2/0/1 & 2/1/1 & 0/0/1 & 2/1/6 & 7/1/1 \\
+\hline
+ & 2 & 0 / 0 / 2 & 0 / 2 / 0 & 1 / 1 / 0 & 2 / 0/ 4 & 1/1/0 & 7/7/0 & 9/0/9 & 7/8/3 & 11 / 5 / 22 & 18 / 12 / 48 & 62 / 16 / 10 \\
+\hline
+ & 3 & 2 / 0 / 4 & 2/4/0 & 2/1/3 & 0/0/3 & 2/2/2 & 50/25/0 & 42 / 0/ 42 & 20/28/9 & 69 / 37 / 65 & 4 / 1 / 10 & 20/6/7 \\
+\hline
+ & 4 & 0/0/0 & 0/0/0 & 0/0/4 & 2/2/0 & 2/3/3 & 156/71/9 & 9/0/7 & 8/7/5 & 36 / 8 / 24 & 0/0/0 & 3/1/0 \\
+\hline
+ & 5 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 3/2/5 & 4/6/0 & 156 / 66 / 3 & 0/0/0 & 2/6/2 & 12 / 5 / 3 & 0/0/0 & 0/0/0 \\
+\hline
+ & 6 & 0 / 0 / 0 & 0/0/0 & 0/0/0 & 0/0/6 & 5/7/0 & 65 / 30 / 1 & 0/0/0 & 0/0/0 & 2/0/4 & 0/0/0 & 0/0/0 \\
+\hline
+\end{tabular}
+\captionsetup{labelformat=empty}
+\caption{Table 7: Predictions on Undirected Edges. In this experiment, $\{1, \ldots, 6\}$ edges of the ground truth graph were undirected. Only graphs where Meek rules do not direct any edge have been considered. All results are shown as correct predictions / incorrect predictions / no prediction, where no prediction indicates that the tagging algorithm kept the edge undirected.}
+\end{center}
+\end{table}
+
+introduced, the average accuracy remains relatively stable. This demonstrates that our approach is quite robust to suboptimal tagging, as incoherent tags get down-weighted by our approach. Note that even if $50 \%$ of the tags are faulty, tagging still results in better-than-random predictions, on average.
+
+\section*{E. 6 Further Results on Graph Faults}
+We report the plots on removed and inverted edges in Fig. 7. All results were obtained in the same manner as in Sec. 4.2 of the main body. While performance varies slightly between the LLMs that generated the tags, we observe no qualitative difference to our reported results on GPT-4.
+
+\section*{E. 7 Further Results on Homogeneity}
+We report the plots on tag homogeneity in Fig. 8 in the same manner as in Sec. 4.3 for all LLMs. While tags differ, all LLMs show high levels of homogeneity. In Tab. 8, we include all tag relations with a positive homogeneity for GPT-4.
+
+\section*{F Technical Details}
+All experiments were run on a system with AMD EPYC 7742 64-core processors (256 threads total) and 2 TB of system RAM. All main and ablation experiments run for several hours, but less than 18 hours in total with full core utilization.
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-24_1219_1395_696_365}
+\captionsetup{labelformat=empty}
+\caption{Figure 6: Accuracy with Noisy Tags. Tagging predicts the correct edge direction more often than not even with high error percentages. Results are fluctuating strongly, as the number of underlying data points can be very small.}
+\end{center}
+\end{figure}
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-25_1509_1400_526_360}
+\captionsetup{labelformat=empty}
+\caption{Figure 7: Accuracy with Errors in the Graph. Tags were generated by the respective LLM. We can see the same general patterns as for GPT-4 for the other LLMs, where removed edges decrease prediction accuracy slightly while adding errors impacts performance more strongly. Smaller datasets are more affected than larger datasets.}
+\end{center}
+\end{figure}
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-26_1593_1414_485_350}
+\captionsetup{labelformat=empty}
+\caption{Figure 8: Tag Homogeneity for all LLMs. A tag relation has high homogeneity (1) if variables of one tag consistently cause the other and low homogeneity ( 0 ) if the cause-effect relationship between these variables is random. We observe high homogeneity throughout all datasets. Hatched areas might appear white on screen due to anti-aliasing.}
+\end{center}
+\end{figure}
+
+\section*{Cancer}
+"Health-related" → "Medical-condition"
+
+\section*{Earthquake}
+"AlarmTrigger" → "Response"\\
+Survey\\
+"Demographic" → "Socioeconomic"\\
+Asia\\
+"Smoking-Related" → "Disease" ( $100 \% / 3$ )
+
+\section*{Lucas}
+"Health\_Risk" → "Physical\_Symptoms" ( $71 \%$ / 7 )\\
+"Health\_Risk" → "Cancer\_Related" ( $57 \% / 7$ )\\
+"Cancer\_Related" → "Physical\_Symptoms" ( $75 \% / 4$ )\\
+"Respiratory\_Issue" → "Physical\_Symptoms" ( $75 \% / 4$ )
+
+\section*{Child}
+"MedicalCondition" → "GasLevels" ( $100 \% / 4$ )\\
+"MedicalCondition" → "OxygenLevels" ( $100 \% / 4$ )\\
+"LungRelated" → "Imaging" ( $100 \% / 3$ )\\
+"MedicalCondition" → "LungRelated" ( $75 \% / 4$ )\\
+"MedicalCondition" → "BloodFlow" (66\% / 3)
+
+\section*{Insurance}
+\begin{center}
+\begin{tabular}{|l|l|}
+\hline
+"VehicleAttributes" → "SafetyFeatures" & (85\% / 7 ) \\
+\hline
+"VehicleAttributes" → "AccidentRelated" & (100\% / 4 ) \\
+\hline
+"PersonalTraits" → "RiskFactors" & (66\% / 6 ) \\
+\hline
+"PersonalTraits" → "SecurityFeatures" & (100\% / 4 ) \\
+\hline
+"PersonalTraits" → "Training" & (66\% / 6 ) \\
+\hline
+"PersonalTraits" → "VehicleAttributes" & (100\% / 4 ) \\
+\hline
+"VehicleCondition" → "VehicleAttributes" & (57\% / 7 ) \\
+\hline
+"VehicleAttributes" → "VehicleCost" & (100\% / 4 ) \\
+\hline
+"VehicleAttributes" → "VehicleValue" & (100\% / 4 ) \\
+\hline
+"VehicleCondition" → "VehicleCost" & (100\% / 4 ) \\
+\hline
+"VehicleCondition" → "VehicleValue" & (100\% / 4 ) \\
+\hline
+"AccidentRelated" → "DamageCost" & (100\% / 3 ) \\
+\hline
+"PersonalTraits" → "AccidentRelated" & (100\% / 3 ) \\
+\hline
+"RiskFactors" → "AccidentRelated" & (75\% / 4 ) \\
+\hline
+"RiskFactors" → "DamageCost" & (100\% / 3 ) \\
+\hline
+"VehicleAttributes" → "DamageCost" & (100\% / 3 ) \\
+\hline
+"PersonalTraits" → "EconomicStatus" & (60\% / 5 ) \\
+\hline
+"PersonalTraits" → "VehicleModel" & (100\% / 3 ) \\
+\hline
+"VehicleCondition" → "SafetyFeatures" & (100\% / 3 ) \\
+\hline
+"VehicleModel" → "VehicleAttributes" & (100\% / 3 ) \\
+\hline
+\multicolumn{2}{|c|}{continued on next page} \\
+\hline
+\end{tabular}
+\end{center}
+
+\begin{figure}[h]
+\begin{center}
+  \includegraphics[alt={},max width=\textwidth]{480a13ad-9c25-44ac-aba2-5d51c7f947a4-28_1900_1049_339_537}
+\captionsetup{labelformat=empty}
+\caption{Table 8: Tag Relations for GPT-4. We consider all tag pairs per data set with homogeneity greater than 0 for GPT-4. We list tag pair probability and support in brackets, with all tag pairs sorted by support. (A probability of $50 \%$ corresponds to a tag homogeneity of 0 , while all smaller probabilities indicate a tag relation in the opposite direction.)}
+\end{center}
+\end{figure}
+
+
+\end{document}
